@@ -54,24 +54,6 @@ type VideoItem = {
   error?: string;
 };
 
-type ProbeStream = {
-  codec_type?: string;
-  codec_name?: string;
-  codec_long_name?: string;
-  profile?: string;
-  width?: number;
-  height?: number;
-  bit_rate?: string;
-  r_frame_rate?: string;
-  sample_rate?: string;
-  channels?: number;
-};
-
-type ProbeResult = {
-  format?: { format_name?: string; format_long_name?: string; duration?: string; bit_rate?: string };
-  streams?: ProbeStream[];
-};
-
 const defaults: Settings = {
   format: "mp4", videoCodec: "libx264", videoBitrate: "auto", audioCodec: "aac", audioBitrate: "192k",
   resolution: "source", customWidth: 1920, customHeight: 1080, aspect: "source", trimStart: 0, trimEnd: 0,
@@ -79,7 +61,6 @@ const defaults: Settings = {
 
 const accepted = ".mp4,.mov,.avi,.wmv,.webm,.mkv,.m4v,.mpeg,.mpg";
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-const safeNumber = (value?: string | number) => value ? Number(value) : undefined;
 const formatBytes = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(n < 1e6 ? 2 : 1)} MB`;
 const formatBitrate = (n?: number) => !n ? "—" : n >= 1e6 ? `${(n / 1e6).toFixed(1)} Mbps` : `${Math.round(n / 1000)} kbps`;
 const formatTime = (s: number) => {
@@ -134,6 +115,31 @@ async function captureBrowserFilmstrip(url: string, duration: number): Promise<T
     }
     return results;
   } catch { return []; }
+}
+
+function parseFfmpegInfo(lines: string[], item: VideoItem, ext: string) {
+  const inputLine = lines.find((line) => line.includes("Input #0,")) || "";
+  const durationLine = lines.find((line) => line.includes("Duration:")) || "";
+  const videoLine = lines.find((line) => line.includes("Video:")) || "";
+  const audioLine = lines.find((line) => line.includes("Audio:")) || "";
+  const durationMatch = durationLine.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  const duration = durationMatch ? Number(durationMatch[1]) * 3600 + Number(durationMatch[2]) * 60 + Number(durationMatch[3]) : item.duration;
+  const resolution = videoLine.match(/(\d{2,5})x(\d{2,5})/);
+  const videoRate = videoLine.match(/(\d+(?:\.\d+)?)\s*kb\/s/);
+  const audioRate = audioLine.match(/(\d+(?:\.\d+)?)\s*kb\/s/);
+  const sampleRate = audioLine.match(/(\d+)\s*Hz/);
+  const fps = videoLine.match(/(\d+(?:\.\d+)?)\s*fps/);
+  const profile = videoLine.match(/Video:\s*[^,]+?\s*\(([^)]+)\)/);
+  const sourceInfo: SourceInfo = {
+    format: inputLine.match(/Input #0,\s*(.+),\s*from/)?.[1] || ext.toUpperCase(),
+    videoCodec: videoLine.match(/Video:\s*([^,(]+)/)?.[1]?.trim() || "Không xác định",
+    videoProfile: profile?.[1], videoBitrate: videoRate ? Number(videoRate[1]) * 1000 : undefined,
+    audioCodec: audioLine.match(/Audio:\s*([^,(]+)/)?.[1]?.trim() || "Không có âm thanh",
+    audioBitrate: audioRate ? Number(audioRate[1]) * 1000 : undefined,
+    audioChannels: /\bmono\b/.test(audioLine) ? 1 : /\bstereo\b/.test(audioLine) ? 2 : Number(audioLine.match(/(\d+)\s*channels?/)?.[1]) || undefined,
+    audioSampleRate: sampleRate ? Number(sampleRate[1]) : undefined, fps: fps?.[1],
+  };
+  return { sourceInfo, duration, width: resolution ? Number(resolution[1]) : item.width, height: resolution ? Number(resolution[2]) : item.height };
 }
 
 export default function App() {
@@ -203,35 +209,27 @@ export default function App() {
     let ffmpeg: FFmpegType | null = null;
     const safeId = item.id.replaceAll("-", "");
     const ext = item.file.name.split(".").pop()?.toLowerCase() || "mp4";
-    const inputName = `probe-${safeId}.${ext}`, probeName = `probe-${safeId}.json`;
+    const inputName = `probe-${safeId}.${ext}`;
     try {
       ffmpeg = await loadEngine();
       const { fetchFile } = await import("@ffmpeg/util");
       await ffmpeg.writeFile(inputName, await fetchFile(item.file));
-      const code = await ffmpeg.ffprobe(["-v", "error", "-show_format", "-show_streams", "-of", "json", inputName, "-o", probeName]);
-      if (code !== 0) throw new Error("FFprobe không đọc được tệp.");
-      const raw = await ffmpeg.readFile(probeName, "utf8");
-      const probe = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw)) as ProbeResult;
-      const videoStream = probe.streams?.find((stream) => stream.codec_type === "video");
-      const audioStream = probe.streams?.find((stream) => stream.codec_type === "audio");
-      const duration = safeNumber(probe.format?.duration) || item.duration;
-      const sourceInfo: SourceInfo = {
-        format: probe.format?.format_long_name || probe.format?.format_name || ext.toUpperCase(),
-        videoCodec: videoStream?.codec_long_name || videoStream?.codec_name || "Không xác định",
-        videoProfile: videoStream?.profile, videoBitrate: safeNumber(videoStream?.bit_rate) || safeNumber(probe.format?.bit_rate),
-        audioCodec: audioStream?.codec_long_name || audioStream?.codec_name || "Không có âm thanh",
-        audioBitrate: safeNumber(audioStream?.bit_rate), audioChannels: audioStream?.channels,
-        audioSampleRate: safeNumber(audioStream?.sample_rate), fps: videoStream?.r_frame_rate,
-      };
+      const logLines: string[] = [];
+      const onLog = ({ message }: { message: string }) => logLines.push(message);
+      ffmpeg.on("log", onLog);
+      await ffmpeg.exec(["-i", inputName]);
+      ffmpeg.off("log", onLog);
+      const { sourceInfo, duration, width, height } = parseFfmpegInfo(logLines, item, ext);
+      if (!logLines.some((line) => line.includes("Input #0,"))) throw new Error("FFmpeg không đọc được tệp.");
       const thumbnails = browserThumbs.length ? browserThumbs : await makeFfmpegThumbnails(ffmpeg, inputName, safeId, duration || 1);
       setVideos((all) => all.map((v) => v.id === item.id ? {
-        ...v, duration, width: videoStream?.width || v.width, height: videoStream?.height || v.height,
+        ...v, duration, width: width || v.width, height: height || v.height,
         settings: { ...v.settings, trimEnd: duration || v.settings.trimEnd }, sourceInfo, thumbnails, analysisStatus: "done",
       } : v));
     } catch {
       setVideos((all) => all.map((v) => v.id === item.id ? { ...v, analysisStatus: "error" } : v));
     } finally {
-      if (ffmpeg) await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(probeName)]);
+      if (ffmpeg) await ffmpeg.deleteFile(inputName).catch(() => undefined);
     }
   };
 
@@ -369,7 +367,7 @@ export default function App() {
             {selected.outputUrl ? <article className="video-preview-card output"><div className="preview-card-head"><div><span>SAU MÃ HÓA</span><strong>{selected.settings.format.toUpperCase()} · {selected.settings.videoCodec === "libx264" ? "H.264" : selected.settings.videoCodec === "libvpx-vp9" ? "VP9" : "MPEG-4"}</strong></div><button onClick={() => void fullscreen(`output-${selected.id}`)}>⛶ Toàn màn hình</button></div><video id={`output-${selected.id}`} src={selected.outputUrl} controls preload="metadata" /></article> : <article className="output-placeholder"><span>→</span><strong>Xem trước sau mã hóa</strong><small>Video kết quả sẽ xuất hiện tại đây để so sánh chất lượng.</small></article>}
           </div>
 
-          <section className="source-info"><div className="section-title"><div><span className="eyebrow">THÔNG TIN FILE GỐC</span><h3>Thông số kỹ thuật</h3></div><span className={`analysis-badge ${selected.analysisStatus}`}>{selected.analysisStatus === "done" ? "Đã đọc bằng FFprobe" : selected.analysisStatus === "error" ? "Không đọc được" : "Đang phân tích…"}</span></div><div className="metadata-grid"><div><span>Định dạng</span><strong>{selected.sourceInfo?.format || selected.file.name.split(".").pop()?.toUpperCase()}</strong></div><div><span>Video codec</span><strong>{selected.sourceInfo?.videoCodec || "Đang đọc…"}</strong><small>{selected.sourceInfo?.videoProfile}</small></div><div><span>Video bitrate</span><strong>{formatBitrate(selected.sourceInfo?.videoBitrate)}</strong></div><div><span>Audio codec</span><strong>{selected.sourceInfo?.audioCodec || "Đang đọc…"}</strong><small>{selected.sourceInfo?.audioChannels ? `${selected.sourceInfo.audioChannels} kênh · ${selected.sourceInfo.audioSampleRate || "?"} Hz` : ""}</small></div><div><span>Audio bitrate</span><strong>{formatBitrate(selected.sourceInfo?.audioBitrate)}</strong></div><div><span>Thời lượng / dung lượng</span><strong>{formatTime(selected.duration)} · {formatBytes(selected.file.size)}</strong></div></div></section>
+          <section className="source-info"><div className="section-title"><div><span className="eyebrow">THÔNG TIN FILE GỐC</span><h3>Thông số kỹ thuật</h3></div><span className={`analysis-badge ${selected.analysisStatus}`}>{selected.analysisStatus === "done" ? "Đã đọc bằng FFmpeg" : selected.analysisStatus === "error" ? "Không đọc được" : "Đang phân tích…"}</span></div><div className="metadata-grid"><div><span>Định dạng</span><strong>{selected.sourceInfo?.format || selected.file.name.split(".").pop()?.toUpperCase()}</strong></div><div><span>Video codec</span><strong>{selected.sourceInfo?.videoCodec || "Đang đọc…"}</strong><small>{selected.sourceInfo?.videoProfile}</small></div><div><span>Video bitrate</span><strong>{formatBitrate(selected.sourceInfo?.videoBitrate)}</strong></div><div><span>Audio codec</span><strong>{selected.sourceInfo?.audioCodec || "Đang đọc…"}</strong><small>{selected.sourceInfo?.audioChannels ? `${selected.sourceInfo.audioChannels} kênh · ${selected.sourceInfo.audioSampleRate || "?"} Hz` : ""}</small></div><div><span>Audio bitrate</span><strong>{formatBitrate(selected.sourceInfo?.audioBitrate)}</strong></div><div><span>Thời lượng / dung lượng</span><strong>{formatTime(selected.duration)} · {formatBytes(selected.file.size)}</strong></div></div></section>
 
           <section className="filmstrip-section"><div className="section-title"><div><span className="eyebrow">THUMBNAIL THEO THỜI GIAN</span><h3>10 đoạn đại diện của video</h3></div><small>Nhấn vào ảnh để xem đúng thời điểm</small></div><div className="filmstrip">{selected.thumbnails.length ? selected.thumbnails.map((thumb, index) => <button key={`${thumb.time}-${index}`} onClick={() => jumpToThumbnail(selected, thumb)}><img src={thumb.url} alt={`Đoạn ${index + 1}`} /><span>{formatTime(thumb.time)}</span></button>) : Array.from({ length: 10 }, (_, index) => <i key={index} className="thumb-skeleton" />)}</div></section>
 
