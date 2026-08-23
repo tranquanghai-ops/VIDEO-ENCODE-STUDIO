@@ -399,7 +399,10 @@ export default function App() {
       videoOptions.fit = "contain";
     }
 
-    const audio = s.audioCodec === "none" ? { discard: true as const } : {
+    const canCopySourceAac = s.audioCodec === "aac" && item.sourceInfo?.audioCodec.toLowerCase() === "aac";
+    const audio = s.audioCodec === "none" ? { discard: true as const } : canCopySourceAac ? {
+      codec: "aac" as const,
+    } : {
       codec: "aac" as const,
       quality: new Quality({ bitrate: parseBitrate(s.audioBitrate) || 128_000 }),
       forceTranscode: true as const,
@@ -411,9 +414,10 @@ export default function App() {
       tags: {}, showWarnings: false,
     });
     activeMediaConversionRef.current = conversion;
-    if (!conversion.isValid) {
+    const discardedRequiredAudio = s.audioCodec !== "none" && conversion.discardedTracks.find((entry) => entry.track.isAudioTrack());
+    if (!conversion.isValid || discardedRequiredAudio) {
       const reasons = conversion.discardedTracks.map((entry) => entry.reason).join(", ");
-      throw new Error(`Trình duyệt không thể thực hiện chuyển đổi AV1 → H.264 (${reasons || "không rõ nguyên nhân"}).`);
+      throw new Error(`Trình duyệt không thể thực hiện đầy đủ chuyển đổi AV1 → H.264/AAC (${reasons || "không rõ nguyên nhân"}).`);
     }
     conversion.onProgress = (progress) => setVideos((all) => all.map((v) => v.id === item.id ? { ...v, progress: Math.min(99, Math.max(0, Math.round(progress * 100))) } : v));
     await conversion.execute();
