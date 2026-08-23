@@ -35,6 +35,14 @@ type SourceInfo = {
 
 type Thumbnail = { url: string; time: number };
 
+type EncodeError = {
+  code: string;
+  title: string;
+  message: string;
+  suggestions: string[];
+  technical?: string;
+};
+
 type VideoItem = {
   id: string;
   file: File;
@@ -52,6 +60,7 @@ type VideoItem = {
   outputUrl?: string;
   outputName?: string;
   error?: string;
+  encodeError?: EncodeError;
 };
 
 const defaults: Settings = {
@@ -68,6 +77,66 @@ const formatTime = (s: number) => {
   const h = Math.floor(value / 3600), m = Math.floor((value % 3600) / 60), sec = Math.floor(value % 60);
   return h ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
 };
+
+const parseBitrate = (value: string) => {
+  const match = value.match(/([\d.]+)\s*([kKmM])?/);
+  if (!match) return undefined;
+  const multiplier = match[2]?.toLowerCase() === "m" ? 1_000_000 : match[2]?.toLowerCase() === "k" ? 1_000 : 1;
+  return Number(match[1]) * multiplier;
+};
+
+function makeEncodeError(error: unknown, logs: string[], item: VideoItem): EncodeError {
+  const rawMessage = error instanceof Error ? error.message : typeof error === "string" ? error : "Không thể mã hóa video.";
+  const usefulLogs = logs
+    .map((line) => line.trim())
+    .filter((line) => line && !/^frame=|^size=|^time=|^bitrate=|^speed=/.test(line));
+  const technical = usefulLogs.slice(-14).join("\n") || rawMessage;
+  const joined = `${rawMessage}\n${technical}`.toLowerCase();
+
+  if (item.sourceInfo?.videoCodec.toLowerCase() === "av1" && /decoder|decode|av1|discarded|invalid conversion/.test(joined)) {
+    return {
+      code: "AV1_DECODE_FAILED",
+      title: "Không giải mã được video AV1",
+      message: "Trình duyệt hoặc bộ giải mã hiện tại không thể đọc luồng hình AV1 của tệp này để chuyển sang định dạng mới.",
+      suggestions: ["Thử lại bằng Chrome hoặc Edge phiên bản mới.", "Giữ định dạng MP4 và chọn video codec H.264.", "Đóng bớt ứng dụng khác nếu thiết bị đang thiếu bộ nhớ."],
+      technical,
+    };
+  }
+  if (/out of memory|memory access|allocation|abort\(oom\)|cannot enlarge memory/.test(joined)) {
+    return {
+      code: "NOT_ENOUGH_MEMORY",
+      title: "Không đủ bộ nhớ để mã hóa",
+      message: "Video cần nhiều bộ nhớ hơn mức trình duyệt hiện có thể cấp phát.",
+      suggestions: ["Đóng bớt tab và ứng dụng khác rồi thử lại.", "Giảm kích thước khung hình hoặc cắt video thành đoạn ngắn hơn."],
+      technical,
+    };
+  }
+  if (/unknown encoder|encoder.*not found|no encodable target codec/.test(joined)) {
+    return {
+      code: "ENCODER_NOT_AVAILABLE",
+      title: "Codec đầu ra không khả dụng",
+      message: "Trình duyệt không hỗ trợ codec đầu ra đang chọn cho định dạng này.",
+      suggestions: ["Chọn MP4 với H.264 và AAC để có độ tương thích cao nhất."],
+      technical,
+    };
+  }
+  if (/invalid argument|dimensions|width|height|not divisible|incorrect parameters/.test(joined)) {
+    return {
+      code: "INVALID_VIDEO_SETTINGS",
+      title: "Thiết lập kích thước không hợp lệ",
+      message: "Kích thước, tỉ lệ hoặc codec đã chọn không thể kết hợp với nhau.",
+      suggestions: ["Dùng chiều rộng và chiều cao là số chẵn.", "Chọn Giữ nguyên hoặc thử 640 × 360."],
+      technical,
+    };
+  }
+  return {
+    code: "ENCODE_FAILED",
+    title: "Mã hóa không thành công",
+    message: rawMessage === "Bộ mã hóa không thể xử lý thiết lập này." ? "FFmpeg đã dừng vì không xử lý được tệp hoặc thiết lập đang chọn." : rawMessage,
+    suggestions: ["Kiểm tra lại định dạng, video codec và audio codec.", "Thử MP4, H.264, AAC và kích thước Giữ nguyên."],
+    technical,
+  };
+}
 
 function normalize(next: Settings): Settings {
   if (next.format === "webm") return { ...next, videoCodec: "libvpx-vp9", audioCodec: next.audioCodec === "none" ? "none" : "libopus" };
@@ -157,10 +226,12 @@ export default function App() {
   const activeIdRef = useRef<string | null>(null);
   const cancelCurrentRef = useRef(false);
   const cancelBatchRef = useRef(false);
+  const activeMediaConversionRef = useRef<{ cancel: () => Promise<void> } | null>(null);
 
   const selected = useMemo(() => videos.find((v) => v.id === selectedId) ?? videos[0], [videos, selectedId]);
   const checkedCount = videos.filter((v) => v.checked).length;
   const doneCount = videos.filter((v) => v.status === "done").length;
+  const failedVideos = videos.filter((v) => v.status === "error");
   const analyzingCount = videos.filter((v) => v.analysisStatus === "running" || v.analysisStatus === "pending").length;
   const totalSize = videos.reduce((sum, item) => sum + item.file.size, 0);
   const allChecked = videos.length > 0 && videos.every((v) => v.checked);
@@ -289,28 +360,99 @@ export default function App() {
     if (s.format === "mp4" || s.format === "mov") args.push("-movflags", "+faststart"); args.push("-y", outputName); return args;
   };
 
+  const encodeAv1WithBrowserCodecs = async (item: VideoItem) => {
+    const {
+      ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, Quality,
+    } = await import("mediabunny");
+    if (item.settings.format !== "mp4" || item.settings.videoCodec !== "libx264") {
+      throw new Error("Video AV1 hiện được hỗ trợ chuyển đổi trực tiếp khi chọn MP4 và H.264.");
+    }
+
+    const target = new BufferTarget();
+    const input = new Input({ formats: ALL_FORMATS, source: new BlobSource(item.file) });
+    const output = new Output({ format: new Mp4OutputFormat({ fastStart: "in-memory" }), target });
+    const s = item.settings;
+    const videoOptions: {
+      codec: "avc";
+      quality: InstanceType<typeof Quality>;
+      forceTranscode: true;
+      width?: number;
+      height?: number;
+      fit?: "contain";
+      frameRate?: number;
+    } = {
+      codec: "avc",
+      quality: s.videoBitrate === "auto" ? new Quality("high") : new Quality({ bitrate: parseBitrate(s.videoBitrate) }),
+      forceTranscode: true,
+    };
+
+    const heights: Record<string, number> = { "2160": 2160, "1080": 1080, "720": 720, "480": 480 };
+    if (s.resolution === "custom") {
+      videoOptions.width = Math.max(16, Math.round(s.customWidth / 2) * 2);
+      videoOptions.height = Math.max(16, Math.round(s.customHeight / 2) * 2);
+      videoOptions.fit = "contain";
+    } else if (heights[s.resolution]) {
+      const height = heights[s.resolution];
+      const ratio = s.aspect === "9:16" ? 9 / 16 : s.aspect === "1:1" ? 1 : s.aspect === "4:3" ? 4 / 3 : 16 / 9;
+      videoOptions.height = height;
+      videoOptions.width = Math.round(height * ratio / 2) * 2;
+      videoOptions.fit = "contain";
+    }
+
+    const audio = s.audioCodec === "none" ? { discard: true as const } : {
+      codec: "aac" as const,
+      quality: new Quality({ bitrate: parseBitrate(s.audioBitrate) || 128_000 }),
+      forceTranscode: true as const,
+    };
+    const trimChanged = s.trimStart > 0 || (s.trimEnd > s.trimStart && s.trimEnd < item.duration - 0.05);
+    const conversion = await Conversion.init({
+      input, output, tracks: "primary", video: videoOptions, audio,
+      trim: trimChanged ? { start: s.trimStart, end: s.trimEnd } : undefined,
+      tags: {}, showWarnings: false,
+    });
+    activeMediaConversionRef.current = conversion;
+    if (!conversion.isValid) {
+      const reasons = conversion.discardedTracks.map((entry) => entry.reason).join(", ");
+      throw new Error(`Trình duyệt không thể thực hiện chuyển đổi AV1 → H.264 (${reasons || "không rõ nguyên nhân"}).`);
+    }
+    conversion.onProgress = (progress) => setVideos((all) => all.map((v) => v.id === item.id ? { ...v, progress: Math.min(99, Math.max(0, Math.round(progress * 100))) } : v));
+    await conversion.execute();
+    if (cancelCurrentRef.current) throw new Error("Đã dừng theo yêu cầu.");
+    if (!target.buffer) throw new Error("Bộ mã hóa trình duyệt không tạo được dữ liệu đầu ra.");
+    return new Uint8Array(target.buffer);
+  };
+
   const encodeOne = async (item: VideoItem) => {
     cancelCurrentRef.current = false; activeIdRef.current = item.id;
-    setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "encoding", progress: 0, error: undefined } : v));
+    setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "encoding", progress: 0, error: undefined, encodeError: undefined } : v));
     let ffmpeg: FFmpegType | null = null; let onProgress: ((data: { progress: number }) => void) | null = null;
+    let onLog: ((data: { message: string }) => void) | null = null; const logs: string[] = [];
     const safeId = item.id.replaceAll("-", ""), ext = item.file.name.split(".").pop()?.toLowerCase() || "mp4";
     const inputName = `input-${safeId}.${ext}`, outputName = `output-${safeId}.${item.settings.format}`;
     try {
-      ffmpeg = await loadEngine(); const { fetchFile } = await import("@ffmpeg/util");
-      onProgress = ({ progress }) => setVideos((all) => all.map((v) => v.id === item.id ? { ...v, progress: Math.min(99, Math.max(0, Math.round(progress * 100))) } : v));
-      ffmpeg.on("progress", onProgress); await ffmpeg.writeFile(inputName, await fetchFile(item.file));
-      const exitCode = await ffmpeg.exec(buildArgs(item, inputName, outputName));
-      if (cancelCurrentRef.current) throw new Error("Đã dừng theo yêu cầu."); if (exitCode !== 0) throw new Error("Bộ mã hóa không thể xử lý thiết lập này.");
-      const data = await ffmpeg.readFile(outputName); const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+      let bytes: Uint8Array;
+      if (item.sourceInfo?.videoCodec.toLowerCase() === "av1") {
+        bytes = await encodeAv1WithBrowserCodecs(item);
+      } else {
+        ffmpeg = await loadEngine(); const { fetchFile } = await import("@ffmpeg/util");
+        onProgress = ({ progress }) => setVideos((all) => all.map((v) => v.id === item.id ? { ...v, progress: Math.min(99, Math.max(0, Math.round(progress * 100))) } : v));
+        onLog = ({ message }) => { logs.push(message); if (logs.length > 160) logs.shift(); };
+        ffmpeg.on("progress", onProgress); ffmpeg.on("log", onLog); await ffmpeg.writeFile(inputName, await fetchFile(item.file));
+        const exitCode = await ffmpeg.exec(buildArgs(item, inputName, outputName));
+        if (cancelCurrentRef.current) throw new Error("Đã dừng theo yêu cầu."); if (exitCode !== 0) throw new Error("Bộ mã hóa không thể xử lý thiết lập này.");
+        const data = await ffmpeg.readFile(outputName); bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
+      }
       const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: `video/${item.settings.format}` }));
       const base = item.file.name.replace(/\.[^.]+$/, "");
       setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "done", progress: 100, outputUrl: url, outputName: `${base}-encoded.${item.settings.format}` } : v));
+      return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : typeof error === "string" ? error : "Không thể mã hóa video.";
-      setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: cancelCurrentRef.current ? "stopped" : "error", error: message } : v));
+      const encodeError = makeEncodeError(error, logs, item);
+      setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: cancelCurrentRef.current ? "stopped" : "error", error: encodeError.message, encodeError } : v));
+      return false;
     } finally {
-      if (ffmpeg && ffmpegRef.current) { if (onProgress) ffmpeg.off("progress", onProgress); await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(outputName)]); }
-      activeIdRef.current = null;
+      if (ffmpeg && ffmpegRef.current) { if (onProgress) ffmpeg.off("progress", onProgress); if (onLog) ffmpeg.off("log", onLog); await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(outputName)]); }
+      activeMediaConversionRef.current = null; activeIdRef.current = null;
     }
   };
 
@@ -318,18 +460,23 @@ export default function App() {
     const queue = videos.filter((video) => video.checked && video.status !== "done"); if (!queue.length) return;
     cancelBatchRef.current = false; setIsBatchRunning(true);
     setVideos((all) => all.map((v) => v.checked && v.status !== "done" ? { ...v, status: "queued" } : v));
-    for (const item of queue) { if (cancelBatchRef.current) break; await encodeOne(item); }
-    setIsBatchRunning(false); setNotice(cancelBatchRef.current ? "Đã dừng toàn bộ hàng đợi." : "Đã xử lý xong các video được chọn.");
+    let completed = 0, failed = 0;
+    for (const item of queue) {
+      if (cancelBatchRef.current) break;
+      const success = await encodeOne(item); success ? completed++ : failed++;
+    }
+    setIsBatchRunning(false);
+    setNotice(cancelBatchRef.current ? "Đã dừng toàn bộ hàng đợi." : failed ? `Hoàn tất ${completed} video, có ${failed} video lỗi. Chọn video lỗi để xem nguyên nhân.` : `Đã mã hóa thành công ${completed} video.`);
   };
 
   const stopCurrentVideo = (id: string) => {
     if (activeIdRef.current !== id) return;
-    cancelCurrentRef.current = true; resetEngine();
+    cancelCurrentRef.current = true; void activeMediaConversionRef.current?.cancel().catch(() => undefined); resetEngine();
     setVideos((all) => all.map((v) => v.id === id ? { ...v, status: "stopped", error: "Đã dừng ngay theo yêu cầu." } : v));
     setNotice("Đã dừng video hiện tại. Các video còn lại vẫn tiếp tục nếu đang chạy hàng loạt.");
   };
   const stopBatch = () => {
-    cancelBatchRef.current = true; cancelCurrentRef.current = true; resetEngine(); setIsBatchRunning(false);
+    cancelBatchRef.current = true; cancelCurrentRef.current = true; void activeMediaConversionRef.current?.cancel().catch(() => undefined); resetEngine(); setIsBatchRunning(false);
     setVideos((all) => all.map((v) => v.status === "encoding" ? { ...v, status: "stopped", error: "Đã dừng hàng loạt." } : v.status === "queued" ? { ...v, status: "ready" } : v));
     setNotice("Đã dừng ngay toàn bộ tiến trình hàng loạt.");
   };
@@ -353,11 +500,12 @@ export default function App() {
             <label className="select-all"><input type="checkbox" checked={allChecked} onChange={toggleAll} /> <span>Chọn tất cả</span><b>{checkedCount} đã chọn</b></label>
             <div className="queue-list">{videos.map((item, index) => <div key={item.id} className={`video-card ${selected?.id === item.id ? "active" : ""}`}>
               <label className="file-check" title="Chọn để xử lý hàng loạt"><input type="checkbox" checked={item.checked} onChange={() => toggleChecked(item.id)} /></label>
-              <button className="video-select" onClick={() => setSelectedId(item.id)}><span className="thumb">{item.thumbnails[0] ? <img src={item.thumbnails[0].url} alt="" /> : <video src={item.url} muted preload="metadata" />}<span>{formatTime(item.duration)}</span></span><span className="video-info"><strong title={item.file.name}>{item.file.name}</strong><small>{item.sourceInfo ? `${item.sourceInfo.format} · ${item.sourceInfo.videoCodec}` : item.analysisStatus === "error" ? "Không đọc được codec" : "Đang đọc thông tin gốc…"}</small><span className={`state state-${item.status}`}>{item.status === "ready" ? "Sẵn sàng" : item.status === "queued" ? "Đang chờ" : item.status === "encoding" ? `Đang mã hóa ${item.progress}%` : item.status === "done" ? "Hoàn tất" : item.status === "stopped" ? "Đã dừng" : "Có lỗi"}</span>{item.status === "encoding" && <i className="progress"><i style={{ width: `${item.progress}%` }} /></i>}</span><span className="index">{String(index + 1).padStart(2, "0")}</span></button>
+              <button className="video-select" onClick={() => setSelectedId(item.id)}><span className="thumb">{item.thumbnails[0] ? <img src={item.thumbnails[0].url} alt="" /> : <video src={item.url} muted preload="metadata" />}<span>{formatTime(item.duration)}</span></span><span className="video-info"><strong title={item.file.name}>{item.file.name}</strong><small>{item.sourceInfo ? `${item.sourceInfo.format} · ${item.sourceInfo.videoCodec}` : item.analysisStatus === "error" ? "Không đọc được codec" : "Đang đọc thông tin gốc…"}</small><span className={`state state-${item.status}`} title={item.encodeError?.message}>{item.status === "ready" ? "Sẵn sàng" : item.status === "queued" ? "Đang chờ" : item.status === "encoding" ? `Đang mã hóa ${item.progress}%` : item.status === "done" ? "Hoàn tất" : item.status === "stopped" ? "Đã dừng" : item.encodeError?.title || "Có lỗi"}</span>{item.status === "encoding" && <i className="progress"><i style={{ width: `${item.progress}%` }} /></i>}</span><span className="index">{String(index + 1).padStart(2, "0")}</span></button>
               {item.status === "encoding" && <button className="row-stop" onClick={() => stopCurrentVideo(item.id)} title="Dừng ngay video này">■</button>}
             </div>)}</div>
           </>}
           {videos.length > 0 && <div className="queue-summary"><span>{formatBytes(totalSize)}</span><span>{doneCount}/{videos.length} hoàn tất</span></div>}
+          {failedVideos.length > 0 && <section className="batch-errors"><strong>⚠ {failedVideos.length} video cần kiểm tra</strong>{failedVideos.map((item) => <button key={item.id} onClick={() => setSelectedId(item.id)}><span>{item.file.name}</span><small>{item.encodeError?.title || item.error || "Mã hóa không thành công"}</small></button>)}</section>}
         </aside>
 
         <section className="editor-panel">{!selected ? <div className="empty-editor"><span>▶</span><h2>Chưa có video</h2><p>Thêm một hoặc nhiều video để bắt đầu chuyển đổi.</p></div> : <>
@@ -378,7 +526,7 @@ export default function App() {
             <fieldset><legend>Cắt video</legend><div className="trim-row"><label>Bắt đầu<input type="number" min="0" max={selected.settings.trimEnd} step="0.1" value={selected.settings.trimStart} onChange={(e) => updateSettings({ trimStart: Math.max(0, Number(e.target.value)) })}/><small>giây</small></label><label>Kết thúc<input type="number" min={selected.settings.trimStart} max={selected.duration} step="0.1" value={Number(selected.settings.trimEnd.toFixed(1))} onChange={(e) => updateSettings({ trimEnd: Math.min(selected.duration, Number(e.target.value)) })}/><small>giây</small></label></div><div className="trim-track"><i style={{ left: `${selected.duration ? selected.settings.trimStart / selected.duration * 100 : 0}%`, right: `${selected.duration ? 100 - selected.settings.trimEnd / selected.duration * 100 : 0}%` }} /></div><small>Thời lượng sau cắt: {formatTime(selected.settings.trimEnd - selected.settings.trimStart)}</small></fieldset>
           </div>
           {selected.outputUrl && <a className="download-card" href={selected.outputUrl} download={selected.outputName}><span>✓</span><div><strong>Video đã sẵn sàng</strong><small>{selected.outputName}</small></div><b>Tải xuống</b></a>}
-          {selected.error && <div className="error-note">{selected.error}</div>}
+          {selected.encodeError ? <section className="error-note detailed"><div className="error-heading"><span>!</span><div><small>MÃ LỖI: {selected.encodeError.code}</small><strong>{selected.encodeError.title}</strong></div></div><p>{selected.encodeError.message}</p><div className="error-context"><span>Tệp gốc</span><b>{selected.sourceInfo?.videoCodec?.toUpperCase() || "?"} · {selected.width || "?"} × {selected.height || "?"}</b><span>Đầu ra đã chọn</span><b>{selected.settings.format.toUpperCase()} · {selected.settings.videoCodec === "libx264" ? "H.264" : selected.settings.videoCodec === "libvpx-vp9" ? "VP9" : "MPEG-4"}</b></div><ul>{selected.encodeError.suggestions.map((suggestion) => <li key={suggestion}>{suggestion}</li>)}</ul>{selected.encodeError.technical && <details><summary>Xem chi tiết kỹ thuật</summary><pre>{selected.encodeError.technical}</pre></details>}</section> : selected.error && <div className="error-note">{selected.error}</div>}
         </>}</section>
       </section>
 
