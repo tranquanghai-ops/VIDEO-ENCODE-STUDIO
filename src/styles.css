@@ -24,6 +24,9 @@ button { color:inherit; }
 .video-card:hover { background:#fff; }.video-card.active { border-color:#b9d3f3; background:#fff; box-shadow:0 5px 18px rgba(20,50,80,.07); }
 .thumb { position:relative; width:74px; height:48px; overflow:hidden; border-radius:8px; background:#1e2935; }.thumb video,.thumb img { width:100%; height:100%; object-fit:cover; }.thumb>span { position:absolute; right:4px; bottom:4px; padding:2px 4px; border-radius:4px; color:#fff; background:rgba(0,0,0,.68); font-size:8px; }
 .video-info { min-width:0; display:flex; flex-direction:column; gap:4px; }.video-info strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; }.video-info small { color:var(--muted); font-size:9px; }.index { color:#a5afb7; font-size:9px; }
+.video-card.has-output .video-info strong { padding-right:58px; }
+.queue-download { position:absolute; top:8px; right:30px; z-index:3; height:24px; padding:0 8px; display:flex; align-items:center; border:1px solid #b7ddd3; border-radius:7px; color:var(--teal); background:#f1fbf8; font-size:8px; font-weight:800; text-decoration:none; box-shadow:0 2px 6px rgba(19,125,112,.12); }
+.queue-download:hover { background:#e2f6f0; }
 .state { width:max-content; font-size:9px; font-weight:800; color:#65727d; }.state-encoding { color:var(--blue); }.state-done { color:var(--teal); }.state-error,.state-stopped { color:#bc4a4a; }
 .progress { display:block; width:100%; height:3px; overflow:hidden; border-radius:4px; background:#dce5ea; }.progress i { display:block; height:100%; background:var(--blue); }
 .queue-summary { display:flex; justify-content:space-between; padding:15px 4px 0; color:var(--muted); font-size:10px; font-weight:700; }
