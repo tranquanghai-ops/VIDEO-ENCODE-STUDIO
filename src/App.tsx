@@ -76,12 +76,12 @@ type VideoItem = {
 };
 
 const defaults: Settings = {
-  format: "mp4", videoCodec: "libx264", videoBitrate: "auto", h264Level: "auto", audioCodec: "aac", audioBitrate: "192k",
+  format: "mp4", videoCodec: "libx264", videoBitrate: "auto", h264Level: "auto", audioCodec: "aac", audioBitrate: "128k",
   audioChannels: "source", audioSampleRate: "source",
   resolution: "source", customWidth: 1920, customHeight: 1080, aspect: "source", trimStart: 0, trimEnd: 0,
 };
 
-const APP_VERSION = "1.0";
+const APP_VERSION = "1.1";
 const accepted = ".mp4,.mov,.avi,.wmv,.webm,.mkv,.m4v,.mpeg,.mpg";
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const formatBytes = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(n < 1e6 ? 2 : 1)} MB`;
@@ -476,8 +476,7 @@ export default function App() {
       videoOptions.fit = "contain";
     }
 
-    const audioTransformRequested = s.audioChannels !== "source" || s.audioSampleRate !== "source";
-    const canCopySourceAac = s.audioCodec === "aac" && item.sourceInfo?.audioCodec.toLowerCase() === "aac" && !audioTransformRequested;
+    const canCopySourceAac = s.audioCodec !== "none" && item.sourceInfo?.audioCodec.toLowerCase() === "aac";
     const audio = s.audioCodec === "none" ? { discard: true as const } : canCopySourceAac ? {
       codec: "aac" as const,
     } : {
@@ -513,11 +512,26 @@ export default function App() {
     let ffmpeg: FFmpegType | null = null; let onProgress: ((data: { progress: number }) => void) | null = null;
     let onLog: ((data: { message: string }) => void) | null = null; const logs: string[] = [];
     const safeId = item.id.replaceAll("-", ""), ext = item.file.name.split(".").pop()?.toLowerCase() || "mp4";
-    const inputName = `input-${safeId}.${ext}`, outputName = `output-${safeId}.${item.settings.format}`;
+    const inputName = `input-${safeId}.${ext}`, outputName = `output-${safeId}.${item.settings.format}`, browserOutputName = `browser-${safeId}.mp4`;
     try {
       let bytes: Uint8Array;
       if (item.sourceInfo?.videoCodec.toLowerCase() === "av1") {
         bytes = await encodeAv1WithBrowserCodecs(item);
+        ffmpeg = await loadEngine();
+        onLog = ({ message }) => { logs.push(message); if (logs.length > 160) logs.shift(); };
+        ffmpeg.on("log", onLog);
+        await ffmpeg.writeFile(browserOutputName, new Uint8Array(bytes));
+        const audioArgs = item.settings.audioCodec === "none" ? ["-an"] : [
+          "-c:a", item.settings.audioCodec, "-b:a", item.settings.audioBitrate,
+          ...(item.settings.audioCodec === "aac" ? ["-profile:a", "aac_low"] : []),
+          ...(item.settings.audioChannels === "source" ? [] : ["-ac", item.settings.audioChannels]),
+          ...(item.settings.audioSampleRate === "source" ? [] : ["-ar", item.settings.audioSampleRate]),
+        ];
+        const audioExitCode = await ffmpeg.exec(["-i", browserOutputName, "-c:v", "copy", ...audioArgs, "-movflags", "+faststart", "-y", outputName]);
+        if (cancelCurrentRef.current) throw new Error("Đã dừng theo yêu cầu.");
+        if (audioExitCode !== 0) throw new Error("Không thể tạo lại âm thanh theo bitrate đã chọn.");
+        const audioFixedData = await ffmpeg.readFile(outputName);
+        bytes = typeof audioFixedData === "string" ? new TextEncoder().encode(audioFixedData) : new Uint8Array(audioFixedData);
       } else {
         ffmpeg = await loadEngine(); const { fetchFile } = await import("@ffmpeg/util");
         onProgress = ({ progress }) => setVideos((all) => all.map((v) => v.id === item.id ? { ...v, progress: Math.min(99, Math.max(0, Math.round(progress * 100))) } : v));
@@ -567,7 +581,7 @@ export default function App() {
       setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: cancelCurrentRef.current ? "stopped" : "error", error: encodeError.message, encodeError } : v));
       return false;
     } finally {
-      if (ffmpeg && ffmpegRef.current) { if (onProgress) ffmpeg.off("progress", onProgress); if (onLog) ffmpeg.off("log", onLog); await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(outputName)]); }
+      if (ffmpeg && ffmpegRef.current) { if (onProgress) ffmpeg.off("progress", onProgress); if (onLog) ffmpeg.off("log", onLog); await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(outputName), ffmpeg.deleteFile(browserOutputName)]); }
       activeMediaConversionRef.current = null; activeIdRef.current = null;
     }
   };
@@ -614,6 +628,7 @@ export default function App() {
           <input ref={inputRef} className="sr-only" type="file" multiple accept={accepted} onChange={changeFiles} />
           {!videos.length ? <button className={`dropzone ${dragging ? "is-dragging" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}><span className="upload-icon">↥</span><strong>Thả video vào đây</strong><span>hoặc nhấn để chọn nhiều tệp</span><small>MP4, MOV, AVI, WMV, WebM, MKV…</small></button> : <>
             <label className="select-all"><input type="checkbox" checked={allChecked} onChange={toggleAll} /> <span>Chọn tất cả</span><b>{checkedCount} đã chọn</b></label>
+            <button className={`add-more-dropzone ${dragging ? "is-dragging" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}><span>↥</span><strong>Kéo thả thêm video vào đây</strong><small>hoặc nhấn để chọn tệp</small></button>
             <div className="queue-list">{videos.map((item, index) => <div key={item.id} className={`video-card ${selected?.id === item.id ? "active" : ""} ${item.outputUrl ? "has-output" : ""}`}>
               <label className="file-check" title="Chọn để xử lý hàng loạt"><input type="checkbox" checked={item.checked} onChange={() => toggleChecked(item.id)} /></label>
               <button className="video-select" onClick={() => setSelectedId(item.id)}><span className="thumb">{item.thumbnails[0] ? <img src={item.thumbnails[0].url} alt="" /> : <video src={item.url} muted preload="metadata" />}<span>{formatTime(item.duration)}</span></span><span className="video-info"><strong title={item.file.name}>{item.file.name}</strong>{item.sourceInfo ? <small className="queue-spec source"><b>Gốc</b>{videoSummary(item.sourceInfo, item.duration, item.file.size)}</small> : <small>{item.analysisStatus === "error" ? "Không đọc được thông số video" : "Đang đọc codec, bitrate, thời lượng…"}</small>}{item.outputInfo && <small className="queue-spec output"><b>Nén</b>{videoSummary(item.outputInfo, item.outputDuration || item.duration, item.outputSize || 0)}</small>}<span className={`state state-${item.status}`} title={item.encodeError?.message}>{item.status === "ready" ? "Sẵn sàng" : item.status === "queued" ? "Đang chờ" : item.status === "encoding" ? `Đang mã hóa ${item.progress}%` : item.status === "done" ? "Hoàn tất" : item.status === "stopped" ? "Đã dừng" : item.encodeError?.title || "Có lỗi"}</span>{item.status === "encoding" && <i className="progress"><i style={{ width: `${item.progress}%` }} /></i>}</span><span className="index">{String(index + 1).padStart(2, "0")}</span></button>
