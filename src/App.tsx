@@ -81,7 +81,7 @@ const defaults: Settings = {
   resolution: "source", customWidth: 1920, customHeight: 1080, aspect: "source", trimStart: 0, trimEnd: 0,
 };
 
-const APP_VERSION = "1.1";
+const APP_VERSION = "1.2";
 const accepted = ".mp4,.mov,.avi,.wmv,.webm,.mkv,.m4v,.mpeg,.mpg";
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const formatBytes = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(n < 1e6 ? 2 : 1)} MB`;
@@ -437,12 +437,12 @@ export default function App() {
     if (s.format === "mp4" || s.format === "mov") args.push("-movflags", "+faststart"); args.push("-y", outputName); return args;
   };
 
-  const encodeAv1WithBrowserCodecs = async (item: VideoItem) => {
+  const encodeH264WithBrowserCodecs = async (item: VideoItem) => {
     const {
       ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, Quality,
     } = await import("mediabunny");
     if (item.settings.format !== "mp4" || item.settings.videoCodec !== "libx264") {
-      throw new Error("Video AV1 hiện được hỗ trợ chuyển đổi trực tiếp khi chọn MP4 và H.264.");
+      throw new Error("WebCodecs hiện được dùng khi đầu ra là MP4 và H.264.");
     }
 
     const target = new BufferTarget();
@@ -496,7 +496,7 @@ export default function App() {
     const discardedRequiredAudio = s.audioCodec !== "none" && conversion.discardedTracks.find((entry) => entry.track.isAudioTrack());
     if (!conversion.isValid || discardedRequiredAudio) {
       const reasons = conversion.discardedTracks.map((entry) => entry.reason).join(", ");
-      throw new Error(`Trình duyệt không thể thực hiện đầy đủ chuyển đổi AV1 → H.264/AAC (${reasons || "không rõ nguyên nhân"}).`);
+      throw new Error(`Trình duyệt không thể thực hiện đầy đủ chuyển đổi sang H.264/AAC (${reasons || "không rõ nguyên nhân"}).`);
     }
     conversion.onProgress = (progress) => setVideos((all) => all.map((v) => v.id === item.id ? { ...v, progress: Math.min(99, Math.max(0, Math.round(progress * 100))) } : v));
     await conversion.execute();
@@ -515,8 +515,25 @@ export default function App() {
     const inputName = `input-${safeId}.${ext}`, outputName = `output-${safeId}.${item.settings.format}`, browserOutputName = `browser-${safeId}.mp4`;
     try {
       let bytes: Uint8Array;
-      if (item.sourceInfo?.videoCodec.toLowerCase() === "av1") {
-        bytes = await encodeAv1WithBrowserCodecs(item);
+      const sourceCodec = item.sourceInfo?.videoCodec.toLowerCase() || "";
+      const useBrowserH264 = (sourceCodec === "av1" || sourceCodec === "h264" || sourceCodec.startsWith("avc"))
+        && item.settings.format === "mp4"
+        && item.settings.videoCodec === "libx264"
+        && (item.settings.h264Level === "auto" || item.settings.h264Level === "3.1");
+      let browserBytes: Uint8Array | undefined;
+      if (useBrowserH264) {
+        try {
+          browserBytes = await encodeH264WithBrowserCodecs(item);
+        } catch (browserError) {
+          if (cancelCurrentRef.current) throw browserError;
+          activeMediaConversionRef.current = null;
+          const reason = browserError instanceof Error ? browserError.message : String(browserError);
+          logs.push(`WebCodecs fallback: ${reason}`);
+          setNotice("WebCodecs không hỗ trợ cấu hình này trên máy hiện tại; đang tự chuyển sang FFmpeg.");
+        }
+      }
+      if (browserBytes) {
+        bytes = browserBytes;
         ffmpeg = await loadEngine();
         onLog = ({ message }) => { logs.push(message); if (logs.length > 160) logs.shift(); };
         ffmpeg.on("log", onLog);
