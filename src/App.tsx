@@ -6,6 +6,8 @@ type AnalysisStatus = "pending" | "running" | "done" | "error";
 type Format = "mp4" | "mov" | "webm" | "mkv";
 type VideoCodec = "libx264" | "libvpx-vp9" | "mpeg4";
 type AudioCodec = "aac" | "libmp3lame" | "libopus" | "libvorbis" | "none";
+type AudioChannels = "source" | "1" | "2";
+type AudioSampleRate = "source" | "32000" | "44100" | "48000";
 
 type Settings = {
   format: Format;
@@ -13,6 +15,8 @@ type Settings = {
   videoBitrate: string;
   audioCodec: AudioCodec;
   audioBitrate: string;
+  audioChannels: AudioChannels;
+  audioSampleRate: AudioSampleRate;
   resolution: string;
   customWidth: number;
   customHeight: number;
@@ -65,6 +69,7 @@ type VideoItem = {
 
 const defaults: Settings = {
   format: "mp4", videoCodec: "libx264", videoBitrate: "auto", audioCodec: "aac", audioBitrate: "192k",
+  audioChannels: "source", audioSampleRate: "source",
   resolution: "source", customWidth: 1920, customHeight: 1080, aspect: "source", trimStart: 0, trimEnd: 0,
 };
 
@@ -365,7 +370,13 @@ export default function App() {
     let size = s.resolution === "custom" ? `${s.customWidth}:${s.customHeight}` : undefined;
     if (height) { const d = s.aspect === "9:16" ? [height, Math.round(height * 16 / 9)] : s.aspect === "1:1" ? [height, height] : s.aspect === "4:3" ? [Math.round(height * 4 / 3), height] : [Math.round(height * 16 / 9), height]; size = `${d[0] % 2 ? d[0] + 1 : d[0]}:${d[1] % 2 ? d[1] + 1 : d[1]}`; }
     if (size) filters.push(`scale=${size}:force_original_aspect_ratio=decrease,pad=${size}:(ow-iw)/2:(oh-ih)/2`); if (filters.length) args.push("-vf", filters.join(","));
-    if (s.audioCodec === "none") args.push("-an"); else args.push("-c:a", s.audioCodec, "-b:a", s.audioBitrate);
+    if (s.audioCodec === "none") {
+      args.push("-an");
+    } else {
+      args.push("-c:a", s.audioCodec, "-b:a", s.audioBitrate);
+      if (s.audioChannels !== "source") args.push("-ac", s.audioChannels);
+      if (s.audioSampleRate !== "source") args.push("-ar", s.audioSampleRate);
+    }
     if (s.format === "mp4" || s.format === "mov") args.push("-movflags", "+faststart"); args.push("-y", outputName); return args;
   };
 
@@ -408,13 +419,16 @@ export default function App() {
       videoOptions.fit = "contain";
     }
 
-    const canCopySourceAac = s.audioCodec === "aac" && item.sourceInfo?.audioCodec.toLowerCase() === "aac";
+    const audioTransformRequested = s.audioChannels !== "source" || s.audioSampleRate !== "source";
+    const canCopySourceAac = s.audioCodec === "aac" && item.sourceInfo?.audioCodec.toLowerCase() === "aac" && !audioTransformRequested;
     const audio = s.audioCodec === "none" ? { discard: true as const } : canCopySourceAac ? {
       codec: "aac" as const,
     } : {
       codec: "aac" as const,
       quality: new Quality({ bitrate: parseBitrate(s.audioBitrate) || 128_000 }),
       forceTranscode: true as const,
+      numberOfChannels: s.audioChannels === "source" ? undefined : Number(s.audioChannels),
+      sampleRate: s.audioSampleRate === "source" ? undefined : Number(s.audioSampleRate),
     };
     const trimChanged = s.trimStart > 0 || (s.trimEnd > s.trimStart && s.trimEnd < item.duration - 0.05);
     const conversion = await Conversion.init({
@@ -512,9 +526,10 @@ export default function App() {
           <input ref={inputRef} className="sr-only" type="file" multiple accept={accepted} onChange={changeFiles} />
           {!videos.length ? <button className={`dropzone ${dragging ? "is-dragging" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}><span className="upload-icon">↥</span><strong>Thả video vào đây</strong><span>hoặc nhấn để chọn nhiều tệp</span><small>MP4, MOV, AVI, WMV, WebM, MKV…</small></button> : <>
             <label className="select-all"><input type="checkbox" checked={allChecked} onChange={toggleAll} /> <span>Chọn tất cả</span><b>{checkedCount} đã chọn</b></label>
-            <div className="queue-list">{videos.map((item, index) => <div key={item.id} className={`video-card ${selected?.id === item.id ? "active" : ""}`}>
+            <div className="queue-list">{videos.map((item, index) => <div key={item.id} className={`video-card ${selected?.id === item.id ? "active" : ""} ${item.outputUrl ? "has-output" : ""}`}>
               <label className="file-check" title="Chọn để xử lý hàng loạt"><input type="checkbox" checked={item.checked} onChange={() => toggleChecked(item.id)} /></label>
               <button className="video-select" onClick={() => setSelectedId(item.id)}><span className="thumb">{item.thumbnails[0] ? <img src={item.thumbnails[0].url} alt="" /> : <video src={item.url} muted preload="metadata" />}<span>{formatTime(item.duration)}</span></span><span className="video-info"><strong title={item.file.name}>{item.file.name}</strong><small>{item.sourceInfo ? `${item.sourceInfo.format} · ${item.sourceInfo.videoCodec}` : item.analysisStatus === "error" ? "Không đọc được codec" : "Đang đọc thông tin gốc…"}</small><span className={`state state-${item.status}`} title={item.encodeError?.message}>{item.status === "ready" ? "Sẵn sàng" : item.status === "queued" ? "Đang chờ" : item.status === "encoding" ? `Đang mã hóa ${item.progress}%` : item.status === "done" ? "Hoàn tất" : item.status === "stopped" ? "Đã dừng" : item.encodeError?.title || "Có lỗi"}</span>{item.status === "encoding" && <i className="progress"><i style={{ width: `${item.progress}%` }} /></i>}</span><span className="index">{String(index + 1).padStart(2, "0")}</span></button>
+              {item.outputUrl && <a className="queue-download" href={item.outputUrl} download={item.outputName} title={`Tải xuống ${item.outputName}`} onClick={(event) => event.stopPropagation()}>↓ Tải</a>}
               {item.status === "encoding" && <button className="row-stop" onClick={() => stopCurrentVideo(item.id)} title="Dừng ngay video này">■</button>}
             </div>)}</div>
           </>}
@@ -534,8 +549,8 @@ export default function App() {
           <section className="filmstrip-section"><div className="section-title"><div><span className="eyebrow">THUMBNAIL THEO THỜI GIAN</span><h3>10 đoạn đại diện của video</h3></div><small>Nhấn vào ảnh để xem đúng thời điểm</small></div><div className="filmstrip">{selected.thumbnails.length ? selected.thumbnails.map((thumb, index) => <button key={`${thumb.time}-${index}`} onClick={() => jumpToThumbnail(selected, thumb)}><img src={thumb.url} alt={`Đoạn ${index + 1}`} /><span>{formatTime(thumb.time)}</span></button>) : Array.from({ length: 10 }, (_, index) => <i key={index} className="thumb-skeleton" />)}</div></section>
 
           <div className="settings-grid">
-            <fieldset><legend>Hình ảnh</legend><label>Định dạng<select value={selected.settings.format} onChange={(e) => updateSettings({ format: e.target.value as Format })}><option value="mp4">MP4</option><option value="mov">MOV</option><option value="webm">WebM</option><option value="mkv">MKV</option></select></label><label>Video codec<select value={selected.settings.videoCodec} onChange={(e) => updateSettings({ videoCodec: e.target.value as VideoCodec })}><option value="libx264">H.264 — tương thích cao</option><option value="libvpx-vp9">VP9 — dung lượng nhỏ</option><option value="mpeg4">MPEG-4</option></select></label><label>Video bitrate<select value={selected.settings.videoBitrate} onChange={(e) => updateSettings({ videoBitrate: e.target.value })}><option value="auto">Tự động (khuyên dùng)</option><option value="2M">2 Mbps</option><option value="5M">5 Mbps</option><option value="10M">10 Mbps</option><option value="20M">20 Mbps</option></select></label></fieldset>
-            <fieldset><legend>Âm thanh</legend><label>Audio codec<select value={selected.settings.audioCodec} onChange={(e) => updateSettings({ audioCodec: e.target.value as AudioCodec })}><option value="aac">AAC</option><option value="libmp3lame">MP3</option><option value="libopus">Opus</option><option value="libvorbis">Vorbis</option><option value="none">Không có âm thanh</option></select></label><label>Audio bitrate<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioBitrate} onChange={(e) => updateSettings({ audioBitrate: e.target.value })}><option value="96k">96 kbps</option><option value="128k">128 kbps</option><option value="192k">192 kbps</option><option value="256k">256 kbps</option><option value="320k">320 kbps</option></select></label></fieldset>
+            <fieldset><legend>Hình ảnh</legend><label>Định dạng<select value={selected.settings.format} onChange={(e) => updateSettings({ format: e.target.value as Format })}><option value="mp4">MP4</option><option value="mov">MOV</option><option value="webm">WebM</option><option value="mkv">MKV</option></select></label><label>Video codec<select value={selected.settings.videoCodec} onChange={(e) => updateSettings({ videoCodec: e.target.value as VideoCodec })}><option value="libx264">H.264 — tương thích cao</option><option value="libvpx-vp9">VP9 — dung lượng nhỏ</option><option value="mpeg4">MPEG-4</option></select></label><label>Video bitrate<select value={selected.settings.videoBitrate} onChange={(e) => updateSettings({ videoBitrate: e.target.value })}><option value="auto">Tự động (khuyên dùng)</option><option value="300k">300 kbps — rất nhỏ</option><option value="500k">500 kbps</option><option value="800k">800 kbps — phù hợp 360p/480p</option><option value="1M">1 Mbps</option><option value="1500k">1,5 Mbps</option><option value="2M">2 Mbps</option><option value="5M">5 Mbps</option><option value="10M">10 Mbps</option><option value="20M">20 Mbps</option></select></label></fieldset>
+            <fieldset><legend>Âm thanh</legend><label>Audio codec<select value={selected.settings.audioCodec} onChange={(e) => updateSettings({ audioCodec: e.target.value as AudioCodec })}><option value="aac">AAC</option><option value="libmp3lame">MP3</option><option value="libopus">Opus</option><option value="libvorbis">Vorbis</option><option value="none">Không có âm thanh</option></select></label><label>Audio bitrate<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioBitrate} onChange={(e) => updateSettings({ audioBitrate: e.target.value })}><option value="96k">96 kbps</option><option value="128k">128 kbps</option><option value="192k">192 kbps</option><option value="256k">256 kbps</option><option value="320k">320 kbps</option></select></label><label>Số kênh<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioChannels} onChange={(e) => updateSettings({ audioChannels: e.target.value as AudioChannels })}><option value="source">Giữ nguyên{selected.sourceInfo?.audioChannels ? ` · ${selected.sourceInfo.audioChannels} kênh` : ""}</option><option value="1">Mono · 1 kênh</option><option value="2">Stereo · 2 kênh</option></select></label><label>Tần số âm thanh<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioSampleRate} onChange={(e) => updateSettings({ audioSampleRate: e.target.value as AudioSampleRate })}><option value="source">Giữ nguyên{selected.sourceInfo?.audioSampleRate ? ` · ${selected.sourceInfo.audioSampleRate} Hz` : ""}</option><option value="32000">32.000 Hz</option><option value="44100">44.100 Hz</option><option value="48000">48.000 Hz</option></select></label></fieldset>
             <fieldset><legend>Khung hình</legend><label>Kích thước<select value={selected.settings.resolution} onChange={(e) => updateSettings({ resolution: e.target.value })}><option value="source">Giữ nguyên</option><option value="2160">4K · 3840×2160</option><option value="1080">Full HD · 1920×1080</option><option value="720">HD · 1280×720</option><option value="480">SD · 854×480</option><option value="custom">Tùy chỉnh</option></select></label><label>Tỉ lệ<select value={selected.settings.aspect} onChange={(e) => updateSettings({ aspect: e.target.value })}><option value="source">Giữ nguyên</option><option value="16:9">16:9 ngang</option><option value="9:16">9:16 dọc</option><option value="4:3">4:3</option><option value="1:1">1:1 vuông</option></select></label>{selected.settings.resolution === "custom" && <div className="dimension-row"><input aria-label="Chiều rộng" type="number" min="16" value={selected.settings.customWidth} onChange={(e) => updateSettings({ customWidth: Number(e.target.value) })}/><span>×</span><input aria-label="Chiều cao" type="number" min="16" value={selected.settings.customHeight} onChange={(e) => updateSettings({ customHeight: Number(e.target.value) })}/></div>}</fieldset>
             <fieldset><legend>Cắt video</legend><div className="trim-row"><label>Bắt đầu<input type="number" min="0" max={selected.settings.trimEnd} step="0.1" value={selected.settings.trimStart} onChange={(e) => updateSettings({ trimStart: Math.max(0, Number(e.target.value)) })}/><small>giây</small></label><label>Kết thúc<input type="number" min={selected.settings.trimStart} max={selected.duration} step="0.1" value={Number(selected.settings.trimEnd.toFixed(1))} onChange={(e) => updateSettings({ trimEnd: Math.min(selected.duration, Number(e.target.value)) })}/><small>giây</small></label></div><div className="trim-track"><i style={{ left: `${selected.duration ? selected.settings.trimStart / selected.duration * 100 : 0}%`, right: `${selected.duration ? 100 - selected.settings.trimEnd / selected.duration * 100 : 0}%` }} /></div><small>Thời lượng sau cắt: {formatTime(selected.settings.trimEnd - selected.settings.trimStart)}</small></fieldset>
           </div>
