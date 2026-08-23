@@ -93,8 +93,9 @@ const formatTime = (s: number) => {
 };
 const videoSummary = (info: SourceInfo | undefined, duration: number, size: number) => {
   const codec = info?.videoCodec ? info.videoCodec.toUpperCase() : "?";
+  const profile = info?.videoProfile ? ` ${info.videoProfile}` : "";
   const level = info?.videoLevel ? ` L${info.videoLevel}` : "";
-  return `${codec}${level} · ${formatBitrate(info?.videoBitrate)} · ${formatTime(duration)} · ${formatBytes(size)}`;
+  return `${codec}${profile}${level} · ${formatBitrate(info?.videoBitrate)} · ${formatTime(duration)} · ${formatBytes(size)}`;
 };
 
 const parseBitrate = (value: string) => {
@@ -412,7 +413,10 @@ export default function App() {
     args.push("-c:v", s.videoCodec);
     if (s.videoCodec === "libx264") {
       args.push("-preset", "veryfast", "-crf", s.videoBitrate === "auto" ? "23" : "21", "-pix_fmt", "yuv420p");
-      if (s.h264Level !== "auto") args.push("-level:v", s.h264Level);
+      if (s.h264Level !== "auto") {
+        if (s.h264Level === "2.1" || s.h264Level === "2.2") args.push("-profile:v", "main");
+        args.push("-level:v", s.h264Level);
+      }
     }
     if (s.videoCodec === "libvpx-vp9") args.push("-crf", s.videoBitrate === "auto" ? "32" : "28", "-b:v", s.videoBitrate === "auto" ? "0" : s.videoBitrate);
     if (s.videoCodec === "mpeg4") args.push("-q:v", "4");
