@@ -93,6 +93,15 @@ function makeEncodeError(error: unknown, logs: string[], item: VideoItem): Encod
   const technical = usefulLogs.slice(-14).join("\n") || rawMessage;
   const joined = `${rawMessage}\n${technical}`.toLowerCase();
 
+  if (/video av1 hiện được hỗ trợ.*mp4.*h\.264/.test(joined)) {
+    return {
+      code: "AV1_OUTPUT_REQUIRES_H264",
+      title: "Video AV1 cần chọn MP4 và H.264",
+      message: "Đường chuyển đổi AV1 trong trình duyệt hiện chỉ tạo đầu ra MP4 với video codec H.264.",
+      suggestions: ["Chọn định dạng MP4.", "Chọn video codec H.264 — tương thích cao.", "Giữ AAC nếu muốn có âm thanh."],
+      technical,
+    };
+  }
   if (item.sourceInfo?.videoCodec.toLowerCase() === "av1" && /decoder|decode|av1|discarded|invalid conversion/.test(joined)) {
     return {
       code: "AV1_DECODE_FAILED",
@@ -428,7 +437,8 @@ export default function App() {
 
   const encodeOne = async (item: VideoItem) => {
     cancelCurrentRef.current = false; activeIdRef.current = item.id;
-    setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "encoding", progress: 0, error: undefined, encodeError: undefined } : v));
+    if (item.outputUrl) URL.revokeObjectURL(item.outputUrl);
+    setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "encoding", progress: 0, error: undefined, encodeError: undefined, outputUrl: undefined, outputName: undefined } : v));
     let ffmpeg: FFmpegType | null = null; let onProgress: ((data: { progress: number }) => void) | null = null;
     let onLog: ((data: { message: string }) => void) | null = null; const logs: string[] = [];
     const safeId = item.id.replaceAll("-", ""), ext = item.file.name.split(".").pop()?.toLowerCase() || "mp4";
