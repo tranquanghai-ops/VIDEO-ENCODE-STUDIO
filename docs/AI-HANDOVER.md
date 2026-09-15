@@ -25,7 +25,7 @@
   4. Build production bundle (`npm run build`).
   5. Đóng gói toàn bộ thư mục `dist/` thành file zip `video-encode.zip` (đảm bảo `index.html` nằm ở root của zip).
   6. Đọc version từ `package.json` và tạo GitHub Release kèm artifact `video-encode.zip`.
-  7. Tự động gửi webhook dispatch `app-release` sang `tranquanghai-ops/TDTU-TKNT-Portal` (yêu cầu secret `PORTAL_DISPATCH_TOKEN`).
+  7. Tự động gửi GitHub REST API `workflow_dispatch` sang workflow `deploy-production.yml` của `tranquanghai-ops/TDTU-TKNT-Portal` (yêu cầu secret `PORTAL_DISPATCH_TOKEN` với quyền tối thiểu duy nhất `Actions: Read and write`).
 
 ## 4. Tích hợp với TDTU-TKNT-Portal
 
