@@ -1,0 +1,90 @@
+name: Release Video Encode Studio
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. v1.2.1)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-video-encode
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, Package & Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build app
+        run: npm run build
+
+      - name: Verify build output
+        run: |
+          test -f dist/index.html || (echo "dist/index.html missing!" && exit 1)
+          test -d dist/assets || (echo "dist/assets missing!" && exit 1)
+          test -d dist/ffmpeg || (echo "dist/ffmpeg missing!" && exit 1)
+          echo "Build verification passed."
+
+      - name: Package artifact
+        run: |
+          cd dist
+          zip -r ../video-encode.zip .
+          cd ..
+          test -f video-encode.zip || (echo "video-encode.zip missing!" && exit 1)
+          echo "Artifact video-encode.zip created successfully."
+
+      - name: Determine Version Tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            TAG="${{ github.event.inputs.version }}"
+          else
+            TAG="v1.2.${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Release tag: $TAG"
+
+      - name: Create GitHub Release
+        id: create-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "Video Encode Studio ${{ steps.tag.outputs.tag }}"
+          body: "Automated distribution artifact release for TDTU TKNT Portal integration."
+          files: video-encode.zip
+          draft: false
+          prerelease: false
+
+      - name: Notify TDTU-TKNT-Portal
+        run: |
+          if [ -n "${{ secrets.PORTAL_DISPATCH_TOKEN }}" ]; then
+            echo "Triggering TDTU-TKNT-Portal deploy via repository_dispatch..."
+            curl -s -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ secrets.PORTAL_DISPATCH_TOKEN }}" \
+              https://api.github.com/repos/tranquanghai-ops/TDTU-TKNT-Portal/dispatches \
+              -d "{\"event_type\":\"app-release\",\"client_payload\":{\"app\":\"video-encode\",\"version\":\"${{ steps.tag.outputs.tag }}\"}}"
+            echo "Dispatch event sent."
+          else
+            echo "::notice::PORTAL_DISPATCH_TOKEN secret is not set in this repository. To enable automatic cross-repo triggering of Portal deployment, add a fine-grained PAT or token with 'Actions: write' scope as secret PORTAL_DISPATCH_TOKEN."
+          fi
