@@ -82,7 +82,7 @@ const defaults: Settings = {
   resolution: "source", customWidth: 1920, customHeight: 1080, aspect: "source", trimStart: 0, trimEnd: 0,
 };
 
-const APP_VERSION = "1.2";
+const APP_VERSION = "1.2.6";
 const accepted = ".mp4,.mov,.avi,.wmv,.webm,.mkv,.m4v,.mpeg,.mpg";
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const formatBytes = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(n < 1e6 ? 2 : 1)} MB`;
@@ -678,9 +678,10 @@ export default function App() {
           {selected.outputUrl && <a className="download-card" href={selected.outputUrl} download={selected.outputName}><span>✓</span><div><strong>Video đã sẵn sàng</strong><small>{selected.outputName}</small></div><b>Tải xuống</b></a>}
           {selected.encodeError ? <section className="error-note detailed"><div className="error-heading"><span>!</span><div><small>MÃ LỖI: {selected.encodeError.code}</small><strong>{selected.encodeError.title}</strong></div></div><p>{selected.encodeError.message}</p><div className="error-context"><span>Tệp gốc</span><b>{selected.sourceInfo?.videoCodec?.toUpperCase() || "?"} · {selected.width || "?"} × {selected.height || "?"}</b><span>Đầu ra đã chọn</span><b>{selected.settings.format.toUpperCase()} · {selected.settings.videoCodec === "libx264" ? "H.264" : selected.settings.videoCodec === "libvpx-vp9" ? "VP9" : "MPEG-4"}</b></div><ul>{selected.encodeError.suggestions.map((suggestion) => <li key={suggestion}>{suggestion}</li>)}</ul>{selected.encodeError.technical && <details><summary>Xem chi tiết kỹ thuật</summary><pre>{selected.encodeError.technical}</pre></details>}</section> : selected.error && <div className="error-note">{selected.error}</div>}
 
+        </>}
           {/* Module Tạo Phụ Đề AI */}
           <SubtitleGenerator ffmpegLoader={loadEngine} selectedVideoFile={selected?.file} />
-        </>}</section>
+        </section>
       </section>
 
       <footer className="actionbar"><div className="footer-status"><span className={engineReady ? "engine ready" : "engine"}>{analyzingCount ? `Đang đọc thông tin gốc: còn ${analyzingCount} video…` : engineReady ? "Bộ mã hóa đã sẵn sàng" : engineLoading ? "Đang khởi động bộ mã hóa…" : notice}</span><small>Phát triển bởi ThS. Trần Quang Hải &amp; ChatGPT (OpenAI) · Phiên bản {APP_VERSION}</small></div><div className="actions"><button className="secondary" disabled={!selected || !videos.length || isBatchRunning} onClick={applyToAll}>Áp dụng cho tất cả tệp</button>{selected?.status === "encoding" && !isBatchRunning && <button className="danger" onClick={() => stopCurrentVideo(selected.id)}>Dừng video này</button>}{isBatchRunning ? <button className="danger" onClick={stopBatch}>Dừng hàng loạt</button> : <><button className="secondary compact" disabled={!selected || analyzingCount > 0} onClick={() => selected && void encodeOne(selected)}>Mã hóa video này</button><button className="primary" disabled={!checkedCount || engineLoading || analyzingCount > 0} onClick={() => void encodeChecked()}>Mã hóa {checkedCount} video <span>→</span></button></>}</div></footer>
