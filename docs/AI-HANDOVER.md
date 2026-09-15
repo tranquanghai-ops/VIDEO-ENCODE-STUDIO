@@ -31,3 +31,5 @@
 
 - `TDTU-TKNT-Portal` đăng ký ứng dụng trong `apps-registry.json` với `id: "video-encode"` và `version: "latest"`.
 - Khi Portal build, workflow sẽ tự động tải file `video-encode.zip` từ release mới nhất của repo này, giải nén vào `build/video-encode/` và triển khai lên Firebase Hosting `tknt-tdtu.web.app`.
+
+End-to-end auto deployment test completed.
