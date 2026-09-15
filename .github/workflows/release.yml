@@ -59,7 +59,8 @@ jobs:
           if [ -n "${{ github.event.inputs.version }}" ]; then
             TAG="${{ github.event.inputs.version }}"
           else
-            TAG="v1.2.${{ github.run_number }}"
+            PKG_VER=$(node -p "require('./package.json').version")
+            TAG="v${PKG_VER}"
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Release tag: $TAG"

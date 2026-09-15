@@ -1,6 +1,10 @@
-import { ChangeEvent, DragEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useMemo, useRef, useState, useEffect } from "react";
 import type { FFmpeg as FFmpegType } from "@ffmpeg/ffmpeg";
-import { SubtitleGenerator } from "./components/SubtitleGenerator";
+import { HeaderGeminiStatus } from "./components/HeaderGeminiStatus";
+import { GeminiKeyModal } from "./components/GeminiKeyModal";
+import { BatchSubtitleStudio } from "./components/BatchSubtitleStudio";
+import { getStoredApiKey, clearStoredApiKey } from "./services/geminiSubtitle";
+import { AUTO_MODEL_ID } from "./services/modelRegistry";
 
 type Status = "ready" | "queued" | "encoding" | "done" | "error" | "stopped";
 type AnalysisStatus = "pending" | "running" | "done" | "error";
@@ -82,7 +86,7 @@ const defaults: Settings = {
   resolution: "source", customWidth: 1920, customHeight: 1080, aspect: "source", trimStart: 0, trimEnd: 0,
 };
 
-const APP_VERSION = "1.2.7";
+const APP_VERSION = "1.3.0";
 const accepted = ".mp4,.mov,.avi,.wmv,.webm,.mkv,.m4v,.mpeg,.mpg";
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const formatBytes = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(n < 1e6 ? 2 : 1)} MB`;
@@ -257,6 +261,40 @@ function parseFfmpegInfo(lines: string[], item: VideoItem, ext: string) {
 }
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<"encode" | "subtitle">("encode");
+  const [apiKey, setApiKey] = useState<string>("");
+  const [keyStorageType, setKeyStorageType] = useState<"session" | "local" | "none">("none");
+  const [selectedModel, setSelectedModel] = useState<string>(AUTO_MODEL_ID);
+  const [showKeyModal, setShowKeyModal] = useState<boolean>(false);
+  const [userEmail, setUserEmail] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    const stored = getStoredApiKey();
+    if (stored.key) {
+      setApiKey(stored.key);
+      setKeyStorageType(stored.type);
+    }
+    try {
+      const userStr = localStorage.getItem("tdtu_user") || sessionStorage.getItem("tdtu_user");
+      if (userStr) {
+        const parsed = JSON.parse(userStr);
+        if (parsed.email) setUserEmail(parsed.email);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  const handleDisconnectKey = () => {
+    clearStoredApiKey();
+    setApiKey("");
+    setKeyStorageType("none");
+  };
+
+  const handleConnectedKey = (key: string, storageType: "session" | "local") => {
+    setApiKey(key);
+    setKeyStorageType(storageType);
+    setShowKeyModal(false);
+  };
+
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -639,52 +677,115 @@ export default function App() {
 
   return (
     <main className="app-shell">
-      <header className="topbar"><div className="brand"><span className="brand-mark">VE</span><div><h1>Video Encode Studio</h1><p>Chuyển đổi video an toàn trên trình duyệt</p></div></div><div className="privacy-pill"><span className="status-dot" /> Xử lý cục bộ</div></header>
-      <section className="workspace">
-        <aside className="queue-panel">
-          <div className="panel-heading"><div><span className="eyebrow">HÀNG ĐỢI</span><h2>{videos.length ? `${videos.length} video` : "Video của bạn"}</h2></div>{videos.length > 0 && <div className="queue-actions"><button className="text-button delete-all" onClick={clearAll}>Xóa tất cả</button><button className="text-button" onClick={() => inputRef.current?.click()}>+ Thêm</button></div>}</div>
-          <input ref={inputRef} className="sr-only" type="file" multiple accept={accepted} onChange={changeFiles} />
-          {!videos.length ? <button className={`dropzone ${dragging ? "is-dragging" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}><span className="upload-icon">↥</span><strong>Thả video vào đây</strong><span>hoặc nhấn để chọn nhiều tệp</span><small>MP4, MOV, AVI, WMV, WebM, MKV…</small></button> : <>
-            <label className="select-all"><input type="checkbox" checked={allChecked} onChange={toggleAll} /> <span>Chọn tất cả</span><b>{checkedCount} đã chọn</b></label>
-            <button className={`add-more-dropzone ${dragging ? "is-dragging" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}><span>↥</span><strong>Kéo thả thêm video vào đây</strong><small>hoặc nhấn để chọn tệp</small></button>
-            <div className="queue-list">{videos.map((item, index) => <div key={item.id} className={`video-card ${selected?.id === item.id ? "active" : ""} ${item.outputUrl ? "has-output" : ""}`}>
-              <label className="file-check" title="Chọn để xử lý hàng loạt"><input type="checkbox" checked={item.checked} onChange={() => toggleChecked(item.id)} /></label>
-              <button className="video-select" onClick={() => setSelectedId(item.id)}><span className="thumb">{item.thumbnails[0] ? <img src={item.thumbnails[0].url} alt="" /> : <video src={item.url} muted preload="metadata" />}<span>{formatTime(item.duration)}</span></span><span className="video-info"><strong title={item.file.name}>{item.file.name}</strong>{item.sourceInfo ? <small className="queue-spec source"><b>Gốc</b>{videoSummary(item.sourceInfo, item.duration, item.file.size)}</small> : <small>{item.analysisStatus === "error" ? "Không đọc được thông số video" : "Đang đọc codec, bitrate, thời lượng…"}</small>}{item.outputInfo && <small className="queue-spec output"><b>Nén</b>{videoSummary(item.outputInfo, item.outputDuration || item.duration, item.outputSize || 0)}</small>}<span className={`state state-${item.status}`} title={item.encodeError?.message}>{item.status === "ready" ? "Sẵn sàng" : item.status === "queued" ? "Đang chờ" : item.status === "encoding" ? `Đang mã hóa ${item.progress}%` : item.status === "done" ? "Hoàn tất" : item.status === "stopped" ? "Đã dừng" : item.encodeError?.title || "Có lỗi"}</span>{item.status === "encoding" && <i className="progress"><i style={{ width: `${item.progress}%` }} /></i>}</span><span className="index">{String(index + 1).padStart(2, "0")}</span></button>
-              {item.outputUrl && <a className="queue-download" href={item.outputUrl} download={item.outputName} title={`Tải xuống ${item.outputName}`} onClick={(event) => event.stopPropagation()}>↓ Tải</a>}
-              {item.status === "encoding" && <button className="row-stop" onClick={() => stopCurrentVideo(item.id)} title="Dừng ngay video này">■</button>}
-            </div>)}</div>
-          </>}
-          {videos.length > 0 && <div className="queue-summary"><span>{formatBytes(totalSize)}</span><span>{doneCount}/{videos.length} hoàn tất</span></div>}
-          {failedVideos.length > 0 && <section className="batch-errors"><strong>⚠ {failedVideos.length} video cần kiểm tra</strong>{failedVideos.map((item) => <button key={item.id} onClick={() => setSelectedId(item.id)}><span>{item.file.name}</span><small>{item.encodeError?.title || item.error || "Mã hóa không thành công"}</small></button>)}</section>}
-        </aside>
-
-        <section className="editor-panel">{!selected ? <div className="empty-editor"><span>▶</span><h2>Chưa có video</h2><p>Thêm một hoặc nhiều video để bắt đầu chuyển đổi.</p></div> : <>
-          <div className="editor-title"><div><span className="eyebrow">THIẾT LẬP VIDEO</span><h2>{selected.file.name}</h2></div><button className="remove-button" onClick={() => removeVideo(selected.id)}>Xóa</button></div>
-          <div className={`preview-grid ${selected.outputUrl ? "has-output" : ""}`}>
-            <article className="video-preview-card"><div className="preview-card-head"><div><span>VIDEO GỐC</span><strong>{selected.width || "?"} × {selected.height || "?"}</strong></div><button onClick={() => void fullscreen(`source-${selected.id}`)}>⛶ Toàn màn hình</button></div><video id={`source-${selected.id}`} src={selected.url} controls preload="metadata" /></article>
-            {selected.outputUrl ? <article className="video-preview-card output"><div className="preview-card-head"><div><span>SAU MÃ HÓA</span><strong>{selected.settings.format.toUpperCase()} · {selected.settings.videoCodec === "libx264" ? "H.264" : selected.settings.videoCodec === "libvpx-vp9" ? "VP9" : "MPEG-4"}</strong></div><button onClick={() => void fullscreen(`output-${selected.id}`)}>⛶ Toàn màn hình</button></div><video id={`output-${selected.id}`} src={selected.outputUrl} controls preload="metadata" /></article> : <article className="output-placeholder"><span>→</span><strong>Xem trước sau mã hóa</strong><small>Video kết quả sẽ xuất hiện tại đây để so sánh chất lượng.</small></article>}
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark">VE</span>
+          <div>
+            <h1>Video Encode Studio</h1>
+            <p>Chuyển đổi video &amp; tạo phụ đề AI an toàn trên trình duyệt</p>
           </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          <HeaderGeminiStatus
+            isConnected={Boolean(apiKey)}
+            keyStorageType={keyStorageType}
+            selectedModel={selectedModel}
+            userEmail={userEmail}
+            onOpenModal={() => setShowKeyModal(true)}
+            onDisconnect={handleDisconnectKey}
+          />
+          <div className="privacy-pill"><span className="status-dot" /> Xử lý cục bộ</div>
+        </div>
+      </header>
 
-          <section className="source-info"><div className="section-title"><div><span className="eyebrow">THÔNG TIN FILE GỐC</span><h3>Thông số kỹ thuật</h3></div><span className={`analysis-badge ${selected.analysisStatus}`}>{selected.analysisStatus === "done" ? "Đã đọc bằng FFmpeg" : selected.analysisStatus === "error" ? "Không đọc được" : "Đang phân tích…"}</span></div><div className="metadata-grid"><div><span>Định dạng</span><strong>{selected.sourceInfo?.format || selected.file.name.split(".").pop()?.toUpperCase()}</strong></div><div><span>Video codec</span><strong>{selected.sourceInfo?.videoCodec || "Đang đọc…"}</strong><small>{[selected.sourceInfo?.videoProfile, selected.sourceInfo?.videoLevel ? `Level ${selected.sourceInfo.videoLevel}` : ""].filter(Boolean).join(" · ")}</small></div><div><span>Video bitrate</span><strong>{formatBitrate(selected.sourceInfo?.videoBitrate)}</strong></div><div><span>Audio codec</span><strong>{selected.sourceInfo?.audioCodec || "Đang đọc…"}</strong><small>{selected.sourceInfo?.audioChannels ? `${selected.sourceInfo.audioChannels} kênh · ${selected.sourceInfo.audioSampleRate || "?"} Hz` : ""}</small></div><div><span>Audio bitrate</span><strong>{formatBitrate(selected.sourceInfo?.audioBitrate)}</strong></div><div><span>Thời lượng / dung lượng</span><strong>{formatTime(selected.duration)} · {formatBytes(selected.file.size)}</strong></div></div></section>
+      {/* Main Tabs Navigation */}
+      <nav className="main-tabs-bar">
+        <button
+          type="button"
+          className={`tab-btn ${activeTab === "encode" ? "active" : ""}`}
+          onClick={() => setActiveTab("encode")}
+        >
+          <span>🎬</span> ENCODE VIDEO
+          {videos.length > 0 && <span className="tab-badge">{videos.length}</span>}
+        </button>
+        <button
+          type="button"
+          className={`tab-btn ${activeTab === "subtitle" ? "active" : ""}`}
+          onClick={() => setActiveTab("subtitle")}
+        >
+          <span>✨</span> TẠO PHỤ ĐỀ AI
+          {videos.length > 0 && <span className="tab-badge">{videos.length}</span>}
+        </button>
+      </nav>
 
-          <section className="filmstrip-section"><div className="section-title"><div><span className="eyebrow">THUMBNAIL THEO THỜI GIAN</span><h3>10 đoạn đại diện của video</h3></div><small>Nhấn vào ảnh để xem đúng thời điểm</small></div><div className="filmstrip">{selected.thumbnails.length ? selected.thumbnails.map((thumb, index) => <button key={`${thumb.time}-${index}`} onClick={() => jumpToThumbnail(selected, thumb)}><img src={thumb.url} alt={`Đoạn ${index + 1}`} /><span>{formatTime(thumb.time)}</span></button>) : Array.from({ length: 10 }, (_, index) => <i key={index} className="thumb-skeleton" />)}</div></section>
+      {activeTab === "encode" && (
+        <>
+          <section className="workspace">
+            <aside className="queue-panel">
+              <div className="panel-heading"><div><span className="eyebrow">HÀNG ĐỢI</span><h2>{videos.length ? `${videos.length} video` : "Video của bạn"}</h2></div>{videos.length > 0 && <div className="queue-actions"><button className="text-button delete-all" onClick={clearAll}>Xóa tất cả</button><button className="text-button" onClick={() => inputRef.current?.click()}>+ Thêm</button></div>}</div>
+              <input ref={inputRef} className="sr-only" type="file" multiple accept={accepted} onChange={changeFiles} />
+              {!videos.length ? <button className={`dropzone ${dragging ? "is-dragging" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}><span className="upload-icon">↥</span><strong>Thả video vào đây</strong><span>hoặc nhấn để chọn nhiều tệp</span><small>MP4, MOV, AVI, WMV, WebM, MKV…</small></button> : <>
+                <label className="select-all"><input type="checkbox" checked={allChecked} onChange={toggleAll} /> <span>Chọn tất cả</span><b>{checkedCount} đã chọn</b></label>
+                <button className={`add-more-dropzone ${dragging ? "is-dragging" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}><span>↥</span><strong>Kéo thả thêm video vào đây</strong><small>hoặc nhấn để chọn tệp</small></button>
+                <div className="queue-list">{videos.map((item, index) => <div key={item.id} className={`video-card ${selected?.id === item.id ? "active" : ""} ${item.outputUrl ? "has-output" : ""}`}>
+                  <label className="file-check" title="Chọn để xử lý hàng loạt"><input type="checkbox" checked={item.checked} onChange={() => toggleChecked(item.id)} /></label>
+                  <button className="video-select" onClick={() => setSelectedId(item.id)}><span className="thumb">{item.thumbnails[0] ? <img src={item.thumbnails[0].url} alt="" /> : <video src={item.url} muted preload="metadata" />}<span>{formatTime(item.duration)}</span></span><span className="video-info"><strong title={item.file.name}>{item.file.name}</strong>{item.sourceInfo ? <small className="queue-spec source"><b>Gốc</b>{videoSummary(item.sourceInfo, item.duration, item.file.size)}</small> : <small>{item.analysisStatus === "error" ? "Không đọc được thông số video" : "Đang đọc codec, bitrate, thời lượng…"}</small>}{item.outputInfo && <small className="queue-spec output"><b>Nén</b>{videoSummary(item.outputInfo, item.outputDuration || item.duration, item.outputSize || 0)}</small>}<span className={`state state-${item.status}`} title={item.encodeError?.message}>{item.status === "ready" ? "Sẵn sàng" : item.status === "queued" ? "Đang chờ" : item.status === "encoding" ? `Đang mã hóa ${item.progress}%` : item.status === "done" ? "Hoàn tất" : item.status === "stopped" ? "Đã dừng" : item.encodeError?.title || "Có lỗi"}</span>{item.status === "encoding" && <i className="progress"><i style={{ width: `${item.progress}%` }} /></i>}</span><span className="index">{String(index + 1).padStart(2, "0")}</span></button>
+                  {item.outputUrl && <a className="queue-download" href={item.outputUrl} download={item.outputName} title={`Tải xuống ${item.outputName}`} onClick={(event) => event.stopPropagation()}>↓ Tải</a>}
+                  {item.status === "encoding" && <button className="row-stop" onClick={() => stopCurrentVideo(item.id)} title="Dừng ngay video này">■</button>}
+                </div>)}</div>
+              </>}
+              {videos.length > 0 && <div className="queue-summary"><span>{formatBytes(totalSize)}</span><span>{doneCount}/{videos.length} hoàn tất</span></div>}
+              {failedVideos.length > 0 && <section className="batch-errors"><strong>⚠ {failedVideos.length} video cần kiểm tra</strong>{failedVideos.map((item) => <button key={item.id} onClick={() => setSelectedId(item.id)}><span>{item.file.name}</span><small>{item.encodeError?.title || item.error || "Mã hóa không thành công"}</small></button>)}</section>}
+            </aside>
 
-          <div className="settings-grid">
-            <fieldset><legend>Hình ảnh</legend><label>Định dạng<select value={selected.settings.format} onChange={(e) => updateSettings({ format: e.target.value as Format })}><option value="mp4">MP4</option><option value="mov">MOV</option><option value="webm">WebM</option><option value="mkv">MKV</option></select></label><label>Video codec<select value={selected.settings.videoCodec} onChange={(e) => updateSettings({ videoCodec: e.target.value as VideoCodec })}><option value="libx264">H.264 — tương thích cao</option><option value="libvpx-vp9">VP9 — dung lượng nhỏ</option><option value="mpeg4">MPEG-4</option></select></label><label>H.264 Level<select disabled={selected.settings.videoCodec !== "libx264"} value={selected.settings.h264Level} onChange={(e) => updateSettings({ h264Level: e.target.value as H264Level })}><option value="auto">Tự động</option><option value="2.1">Level 2.1</option><option value="2.2">Level 2.2 — đầu xe đời cũ</option><option value="3.0">Level 3.0</option><option value="3.1">Level 3.1</option><option value="4.0">Level 4.0</option><option value="4.1">Level 4.1</option></select></label><label>Video bitrate<select value={selected.settings.videoBitrate} onChange={(e) => updateSettings({ videoBitrate: e.target.value })}><option value="auto">Tự động (khuyên dùng)</option><option value="100k">100 kbps — cực nhỏ</option><option value="150k">150 kbps</option><option value="200k">200 kbps</option><option value="250k">250 kbps</option><option value="300k">300 kbps — rất nhỏ</option><option value="500k">500 kbps</option><option value="800k">800 kbps — phù hợp 360p/480p</option><option value="1M">1 Mbps</option><option value="1500k">1,5 Mbps</option><option value="2M">2 Mbps</option><option value="5M">5 Mbps</option><option value="10M">10 Mbps</option><option value="20M">20 Mbps</option></select></label><small className="setting-hint">AV1 thường cần bitrate thấp hơn H.264 để đạt chất lượng tương đương.</small></fieldset>
-            <fieldset><legend>Âm thanh</legend><label>Audio codec<select value={selected.settings.audioCodec} onChange={(e) => updateSettings({ audioCodec: e.target.value as AudioCodec })}><option value="aac">AAC</option><option value="libmp3lame">MP3</option><option value="libopus">Opus</option><option value="libvorbis">Vorbis</option><option value="none">Không có âm thanh</option></select></label><label>Audio bitrate<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioBitrate} onChange={(e) => updateSettings({ audioBitrate: e.target.value })}><option value="96k">96 kbps</option><option value="128k">128 kbps</option><option value="192k">192 kbps</option><option value="256k">256 kbps</option><option value="320k">320 kbps</option></select></label><label>Số kênh<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioChannels} onChange={(e) => updateSettings({ audioChannels: e.target.value as AudioChannels })}><option value="source">Giữ nguyên{selected.sourceInfo?.audioChannels ? ` · ${selected.sourceInfo.audioChannels} kênh` : ""}</option><option value="1">Mono · 1 kênh</option><option value="2">Stereo · 2 kênh</option></select></label><label>Tần số âm thanh<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioSampleRate} onChange={(e) => updateSettings({ audioSampleRate: e.target.value as AudioSampleRate })}><option value="source">Giữ nguyên{selected.sourceInfo?.audioSampleRate ? ` · ${selected.sourceInfo.audioSampleRate} Hz` : ""}</option><option value="32000">32.000 Hz</option><option value="44100">44.100 Hz</option><option value="48000">48.000 Hz</option></select></label></fieldset>
-            <fieldset><legend>Khung hình</legend><label>Kích thước<select value={selected.settings.resolution} onChange={(e) => updateSettings({ resolution: e.target.value })}><option value="source">Giữ nguyên</option><option value="2160">4K · 3840×2160</option><option value="1080">Full HD · 1920×1080</option><option value="720">HD · 1280×720</option><option value="480">SD · 854×480</option><option value="custom">Tùy chỉnh</option></select></label><label>Tỉ lệ<select value={selected.settings.aspect} onChange={(e) => updateSettings({ aspect: e.target.value })}><option value="source">Giữ nguyên</option><option value="16:9">16:9 ngang</option><option value="9:16">9:16 dọc</option><option value="4:3">4:3</option><option value="1:1">1:1 vuông</option></select></label>{selected.settings.resolution === "custom" && <div className="dimension-row"><input aria-label="Chiều rộng" type="number" min="16" value={selected.settings.customWidth} onChange={(e) => updateSettings({ customWidth: Number(e.target.value) })}/><span>×</span><input aria-label="Chiều cao" type="number" min="16" value={selected.settings.customHeight} onChange={(e) => updateSettings({ customHeight: Number(e.target.value) })}/></div>}</fieldset>
-            <fieldset><legend>Cắt video</legend><div className="trim-row"><label>Bắt đầu<input type="number" min="0" max={selected.settings.trimEnd} step="0.1" value={selected.settings.trimStart} onChange={(e) => updateSettings({ trimStart: Math.max(0, Number(e.target.value)) })}/><small>giây</small></label><label>Kết thúc<input type="number" min={selected.settings.trimStart} max={selected.duration} step="0.1" value={Number(selected.settings.trimEnd.toFixed(1))} onChange={(e) => updateSettings({ trimEnd: Math.min(selected.duration, Number(e.target.value)) })}/><small>giây</small></label></div><div className="trim-track"><i style={{ left: `${selected.duration ? selected.settings.trimStart / selected.duration * 100 : 0}%`, right: `${selected.duration ? 100 - selected.settings.trimEnd / selected.duration * 100 : 0}%` }} /></div><small>Thời lượng sau cắt: {formatTime(selected.settings.trimEnd - selected.settings.trimStart)}</small></fieldset>
-          </div>
-          {selected.outputUrl && <a className="download-card" href={selected.outputUrl} download={selected.outputName}><span>✓</span><div><strong>Video đã sẵn sàng</strong><small>{selected.outputName}</small></div><b>Tải xuống</b></a>}
-          {selected.encodeError ? <section className="error-note detailed"><div className="error-heading"><span>!</span><div><small>MÃ LỖI: {selected.encodeError.code}</small><strong>{selected.encodeError.title}</strong></div></div><p>{selected.encodeError.message}</p><div className="error-context"><span>Tệp gốc</span><b>{selected.sourceInfo?.videoCodec?.toUpperCase() || "?"} · {selected.width || "?"} × {selected.height || "?"}</b><span>Đầu ra đã chọn</span><b>{selected.settings.format.toUpperCase()} · {selected.settings.videoCodec === "libx264" ? "H.264" : selected.settings.videoCodec === "libvpx-vp9" ? "VP9" : "MPEG-4"}</b></div><ul>{selected.encodeError.suggestions.map((suggestion) => <li key={suggestion}>{suggestion}</li>)}</ul>{selected.encodeError.technical && <details><summary>Xem chi tiết kỹ thuật</summary><pre>{selected.encodeError.technical}</pre></details>}</section> : selected.error && <div className="error-note">{selected.error}</div>}
+            <section className="editor-panel">{!selected ? <div className="empty-editor"><span>▶</span><h2>Chưa có video</h2><p>Thêm một hoặc nhiều video để bắt đầu chuyển đổi.</p></div> : <>
+              <div className="editor-title"><div><span className="eyebrow">THIẾT LẬP VIDEO</span><h2>{selected.file.name}</h2></div><button className="remove-button" onClick={() => removeVideo(selected.id)}>Xóa</button></div>
+              <div className={`preview-grid ${selected.outputUrl ? "has-output" : ""}`}>
+                <article className="video-preview-card"><div className="preview-card-head"><div><span>VIDEO GỐC</span><strong>{selected.width || "?"} × {selected.height || "?"}</strong></div><button onClick={() => void fullscreen(`source-${selected.id}`)}>⛶ Toàn màn hình</button></div><video id={`source-${selected.id}`} src={selected.url} controls preload="metadata" /></article>
+                {selected.outputUrl ? <article className="video-preview-card output"><div className="preview-card-head"><div><span>SAU MÃ HÓA</span><strong>{selected.settings.format.toUpperCase()} · {selected.settings.videoCodec === "libx264" ? "H.264" : selected.settings.videoCodec === "libvpx-vp9" ? "VP9" : "MPEG-4"}</strong></div><button onClick={() => void fullscreen(`output-${selected.id}`)}>⛶ Toàn màn hình</button></div><video id={`output-${selected.id}`} src={selected.outputUrl} controls preload="metadata" /></article> : <article className="output-placeholder"><span>→</span><strong>Xem trước sau mã hóa</strong><small>Video kết quả sẽ xuất hiện tại đây để so sánh chất lượng.</small></article>}
+              </div>
 
-        </>}
-          {/* Module Tạo Phụ Đề AI */}
-          <SubtitleGenerator ffmpegLoader={loadEngine} selectedVideoFile={selected?.file} />
-        </section>
-      </section>
+              <section className="source-info"><div className="section-title"><div><span className="eyebrow">THÔNG TIN FILE GỐC</span><h3>Thông số kỹ thuật</h3></div><span className={`analysis-badge ${selected.analysisStatus}`}>{selected.analysisStatus === "done" ? "Đã đọc bằng FFmpeg" : selected.analysisStatus === "error" ? "Không đọc được" : "Đang phân tích…"}</span></div><div className="metadata-grid"><div><span>Định dạng</span><strong>{selected.sourceInfo?.format || selected.file.name.split(".").pop()?.toUpperCase()}</strong></div><div><span>Video codec</span><strong>{selected.sourceInfo?.videoCodec || "Đang đọc…"}</strong><small>{[selected.sourceInfo?.videoProfile, selected.sourceInfo?.videoLevel ? `Level ${selected.sourceInfo.videoLevel}` : ""].filter(Boolean).join(" · ")}</small></div><div><span>Video bitrate</span><strong>{formatBitrate(selected.sourceInfo?.videoBitrate)}</strong></div><div><span>Audio codec</span><strong>{selected.sourceInfo?.audioCodec || "Đang đọc…"}</strong><small>{selected.sourceInfo?.audioChannels ? `${selected.sourceInfo.audioChannels} kênh · ${selected.sourceInfo.audioSampleRate || "?"} Hz` : ""}</small></div><div><span>Audio bitrate</span><strong>{formatBitrate(selected.sourceInfo?.audioBitrate)}</strong></div><div><span>Thời lượng / dung lượng</span><strong>{formatTime(selected.duration)} · {formatBytes(selected.file.size)}</strong></div></div></section>
 
-      <footer className="actionbar"><div className="footer-status"><span className={engineReady ? "engine ready" : "engine"}>{analyzingCount ? `Đang đọc thông tin gốc: còn ${analyzingCount} video…` : engineReady ? "Bộ mã hóa đã sẵn sàng" : engineLoading ? "Đang khởi động bộ mã hóa…" : notice}</span><small>Phát triển bởi ThS. Trần Quang Hải &amp; ChatGPT (OpenAI) · Phiên bản {APP_VERSION}</small></div><div className="actions"><button className="secondary" disabled={!selected || !videos.length || isBatchRunning} onClick={applyToAll}>Áp dụng cho tất cả tệp</button>{selected?.status === "encoding" && !isBatchRunning && <button className="danger" onClick={() => stopCurrentVideo(selected.id)}>Dừng video này</button>}{isBatchRunning ? <button className="danger" onClick={stopBatch}>Dừng hàng loạt</button> : <><button className="secondary compact" disabled={!selected || analyzingCount > 0} onClick={() => selected && void encodeOne(selected)}>Mã hóa video này</button><button className="primary" disabled={!checkedCount || engineLoading || analyzingCount > 0} onClick={() => void encodeChecked()}>Mã hóa {checkedCount} video <span>→</span></button></>}</div></footer>
+              <section className="filmstrip-section"><div className="section-title"><div><span className="eyebrow">THUMBNAIL THEO THỜI GIAN</span><h3>10 đoạn đại diện của video</h3></div><small>Nhấn vào ảnh để xem đúng thời điểm</small></div><div className="filmstrip">{selected.thumbnails.length ? selected.thumbnails.map((thumb, index) => <button key={`${thumb.time}-${index}`} onClick={() => jumpToThumbnail(selected, thumb)}><img src={thumb.url} alt={`Đoạn ${index + 1}`} /><span>{formatTime(thumb.time)}</span></button>) : Array.from({ length: 10 }, (_, index) => <i key={index} className="thumb-skeleton" />)}</div></section>
+
+              <div className="settings-grid">
+                <fieldset><legend>Hình ảnh</legend><label>Định dạng<select value={selected.settings.format} onChange={(e) => updateSettings({ format: e.target.value as Format })}><option value="mp4">MP4</option><option value="mov">MOV</option><option value="webm">WebM</option><option value="mkv">MKV</option></select></label><label>Video codec<select value={selected.settings.videoCodec} onChange={(e) => updateSettings({ videoCodec: e.target.value as VideoCodec })}><option value="libx264">H.264 — tương thích cao</option><option value="libvpx-vp9">VP9 — dung lượng nhỏ</option><option value="mpeg4">MPEG-4</option></select></label><label>H.264 Level<select disabled={selected.settings.videoCodec !== "libx264"} value={selected.settings.h264Level} onChange={(e) => updateSettings({ h264Level: e.target.value as H264Level })}><option value="auto">Tự động</option><option value="2.1">Level 2.1</option><option value="2.2">Level 2.2 — đầu xe đời cũ</option><option value="3.0">Level 3.0</option><option value="3.1">Level 3.1</option><option value="4.0">Level 4.0</option><option value="4.1">Level 4.1</option></select></label><label>Video bitrate<select value={selected.settings.videoBitrate} onChange={(e) => updateSettings({ videoBitrate: e.target.value })}><option value="auto">Tự động (khuyên dùng)</option><option value="100k">100 kbps — cực nhỏ</option><option value="150k">150 kbps</option><option value="200k">200 kbps</option><option value="250k">250 kbps</option><option value="300k">300 kbps — rất nhỏ</option><option value="500k">500 kbps</option><option value="800k">800 kbps — phù hợp 360p/480p</option><option value="1M">1 Mbps</option><option value="1500k">1,5 Mbps</option><option value="2M">2 Mbps</option><option value="5M">5 Mbps</option><option value="10M">10 Mbps</option><option value="20M">20 Mbps</option></select></label><small className="setting-hint">AV1 thường cần bitrate thấp hơn H.264 để đạt chất lượng tương đương.</small></fieldset>
+                <fieldset><legend>Âm thanh</legend><label>Audio codec<select value={selected.settings.audioCodec} onChange={(e) => updateSettings({ audioCodec: e.target.value as AudioCodec })}><option value="aac">AAC</option><option value="libmp3lame">MP3</option><option value="libopus">Opus</option><option value="libvorbis">Vorbis</option><option value="none">Không có âm thanh</option></select></label><label>Audio bitrate<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioBitrate} onChange={(e) => updateSettings({ audioBitrate: e.target.value })}><option value="96k">96 kbps</option><option value="128k">128 kbps</option><option value="192k">192 kbps</option><option value="256k">256 kbps</option><option value="320k">320 kbps</option></select></label><label>Số kênh<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioChannels} onChange={(e) => updateSettings({ audioChannels: e.target.value as AudioChannels })}><option value="source">Giữ nguyên{selected.sourceInfo?.audioChannels ? ` · ${selected.sourceInfo.audioChannels} kênh` : ""}</option><option value="1">Mono · 1 kênh</option><option value="2">Stereo · 2 kênh</option></select></label><label>Tần số âm thanh<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioSampleRate} onChange={(e) => updateSettings({ audioSampleRate: e.target.value as AudioSampleRate })}><option value="source">Giữ nguyên{selected.sourceInfo?.audioSampleRate ? ` · ${selected.sourceInfo.audioSampleRate} Hz` : ""}</option><option value="32000">32.000 Hz</option><option value="44100">44.100 Hz</option><option value="48000">48.000 Hz</option></select></label></fieldset>
+                <fieldset><legend>Khung hình</legend><label>Kích thước<select value={selected.settings.resolution} onChange={(e) => updateSettings({ resolution: e.target.value })}><option value="source">Giữ nguyên</option><option value="2160">4K · 3840×2160</option><option value="1080">Full HD · 1920×1080</option><option value="720">HD · 1280×720</option><option value="480">SD · 854×480</option><option value="custom">Tùy chỉnh</option></select></label><label>Tỉ lệ<select value={selected.settings.aspect} onChange={(e) => updateSettings({ aspect: e.target.value })}><option value="source">Giữ nguyên</option><option value="16:9">16:9 ngang</option><option value="9:16">9:16 dọc</option><option value="4:3">4:3</option><option value="1:1">1:1 vuông</option></select></label>{selected.settings.resolution === "custom" && <div className="dimension-row"><input aria-label="Chiều rộng" type="number" min="16" value={selected.settings.customWidth} onChange={(e) => updateSettings({ customWidth: Number(e.target.value) })}/><span>×</span><input aria-label="Chiều cao" type="number" min="16" value={selected.settings.customHeight} onChange={(e) => updateSettings({ customHeight: Number(e.target.value) })}/></div>}</fieldset>
+                <fieldset><legend>Cắt video</legend><div className="trim-row"><label>Bắt đầu<input type="number" min="0" max={selected.settings.trimEnd} step="0.1" value={selected.settings.trimStart} onChange={(e) => updateSettings({ trimStart: Math.max(0, Number(e.target.value)) })}/><small>giây</small></label><label>Kết thúc<input type="number" min={selected.settings.trimStart} max={selected.duration} step="0.1" value={Number(selected.settings.trimEnd.toFixed(1))} onChange={(e) => updateSettings({ trimEnd: Math.min(selected.duration, Number(e.target.value)) })}/><small>giây</small></label></div><div className="trim-track"><i style={{ left: `${selected.duration ? selected.settings.trimStart / selected.duration * 100 : 0}%`, right: `${selected.duration ? 100 - selected.settings.trimEnd / selected.duration * 100 : 0}%` }} /></div><small>Thời lượng sau cắt: {formatTime(selected.settings.trimEnd - selected.settings.trimStart)}</small></fieldset>
+              </div>
+              {selected.outputUrl && <a className="download-card" href={selected.outputUrl} download={selected.outputName}><span>✓</span><div><strong>Video đã sẵn sàng</strong><small>{selected.outputName}</small></div><b>Tải xuống</b></a>}
+              {selected.encodeError ? <section className="error-note detailed"><div className="error-heading"><span>!</span><div><small>MÃ LỖI: {selected.encodeError.code}</small><strong>{selected.encodeError.title}</strong></div></div><p>{selected.encodeError.message}</p><div className="error-context"><span>Tệp gốc</span><b>{selected.sourceInfo?.videoCodec?.toUpperCase() || "?"} · {selected.width || "?"} × {selected.height || "?"}</b><span>Đầu ra đã chọn</span><b>{selected.settings.format.toUpperCase()} · {selected.settings.videoCodec === "libx264" ? "H.264" : selected.settings.videoCodec === "libvpx-vp9" ? "VP9" : "MPEG-4"}</b></div><ul>{selected.encodeError.suggestions.map((suggestion) => <li key={suggestion}>{suggestion}</li>)}</ul>{selected.encodeError.technical && <details><summary>Xem chi tiết kỹ thuật</summary><pre>{selected.encodeError.technical}</pre></details>}</section> : selected.error && <div className="error-note">{selected.error}</div>}
+            </>}
+            </section>
+          </section>
+
+          <footer className="actionbar"><div className="footer-status"><span className={engineReady ? "engine ready" : "engine"}>{analyzingCount ? `Đang đọc thông tin gốc: còn ${analyzingCount} video…` : engineReady ? "Bộ mã hóa đã sẵn sàng" : engineLoading ? "Đang khởi động bộ mã hóa…" : notice}</span><small>Phát triển bởi ThS. Trần Quang Hải &amp; ChatGPT (OpenAI) · Phiên bản {APP_VERSION}</small></div><div className="actions"><button className="secondary" disabled={!selected || !videos.length || isBatchRunning} onClick={applyToAll}>Áp dụng cho tất cả tệp</button>{selected?.status === "encoding" && !isBatchRunning && <button className="danger" onClick={() => stopCurrentVideo(selected.id)}>Dừng video này</button>}{isBatchRunning ? <button className="danger" onClick={stopBatch}>Dừng hàng loạt</button> : <><button className="secondary compact" disabled={!selected || analyzingCount > 0} onClick={() => selected && void encodeOne(selected)}>Mã hóa video này</button><button className="primary" disabled={!checkedCount || engineLoading || analyzingCount > 0} onClick={() => void encodeChecked()}>Mã hóa {checkedCount} video <span>→</span></button></>}</div></footer>
+        </>
+      )}
+
+      {activeTab === "subtitle" && (
+        <BatchSubtitleStudio
+          videos={videos}
+          onAddFiles={addFiles}
+          onRemoveVideo={removeVideo}
+          ffmpegLoader={loadEngine}
+          apiKey={apiKey}
+          isConnected={Boolean(apiKey)}
+          selectedModel={selectedModel}
+          onModelChange={setSelectedModel}
+          onOpenKeyModal={() => setShowKeyModal(true)}
+        />
+      )}
+
+      <GeminiKeyModal
+        isOpen={showKeyModal}
+        initialKey={apiKey}
+        initialStorageType={keyStorageType}
+        onClose={() => setShowKeyModal(false)}
+        onConnected={handleConnectedKey}
+      />
     </main>
   );
 }
