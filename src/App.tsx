@@ -1,5 +1,6 @@
 import { ChangeEvent, DragEvent, useMemo, useRef, useState } from "react";
 import type { FFmpeg as FFmpegType } from "@ffmpeg/ffmpeg";
+import { SubtitleGenerator } from "./components/SubtitleGenerator";
 
 type Status = "ready" | "queued" | "encoding" | "done" | "error" | "stopped";
 type AnalysisStatus = "pending" | "running" | "done" | "error";
@@ -676,6 +677,9 @@ export default function App() {
           </div>
           {selected.outputUrl && <a className="download-card" href={selected.outputUrl} download={selected.outputName}><span>✓</span><div><strong>Video đã sẵn sàng</strong><small>{selected.outputName}</small></div><b>Tải xuống</b></a>}
           {selected.encodeError ? <section className="error-note detailed"><div className="error-heading"><span>!</span><div><small>MÃ LỖI: {selected.encodeError.code}</small><strong>{selected.encodeError.title}</strong></div></div><p>{selected.encodeError.message}</p><div className="error-context"><span>Tệp gốc</span><b>{selected.sourceInfo?.videoCodec?.toUpperCase() || "?"} · {selected.width || "?"} × {selected.height || "?"}</b><span>Đầu ra đã chọn</span><b>{selected.settings.format.toUpperCase()} · {selected.settings.videoCodec === "libx264" ? "H.264" : selected.settings.videoCodec === "libvpx-vp9" ? "VP9" : "MPEG-4"}</b></div><ul>{selected.encodeError.suggestions.map((suggestion) => <li key={suggestion}>{suggestion}</li>)}</ul>{selected.encodeError.technical && <details><summary>Xem chi tiết kỹ thuật</summary><pre>{selected.encodeError.technical}</pre></details>}</section> : selected.error && <div className="error-note">{selected.error}</div>}
+
+          {/* Module Tạo Phụ Đề AI */}
+          <SubtitleGenerator ffmpegLoader={loadEngine} selectedVideoFile={selected?.file} />
         </>}</section>
       </section>
 
