@@ -17,7 +17,7 @@
 ## 3. Quy trình Tự động Đóng gói & Phát hành (CI/CD)
 
 - **Workflow:** `.github/workflows/release.yml`
-- **Cơ chế:** Kích hoạt tự động khi push code lên nhánh `main`.
+- **Cơ chế:** Kích hoạt khi push immutable release tag `vX.Y.Z` khớp với `package.json`.
 - **Các bước thực hiện:**
   1. Kiểm tra mã nguồn.
   2. Thiết lập môi trường Node.js 20.
@@ -25,11 +25,11 @@
   4. Build production bundle (`npm run build`).
   5. Đóng gói toàn bộ thư mục `dist/` thành file zip `video-encode.zip` (đảm bảo `index.html` nằm ở root của zip).
   6. Đọc version từ `package.json` và tạo GitHub Release kèm artifact `video-encode.zip`.
-  7. Tự động gửi GitHub REST API `workflow_dispatch` sang workflow `deploy-production.yml` của `tranquanghai-ops/TDTU-TKNT-Portal` (yêu cầu secret `PORTAL_DISPATCH_TOKEN` với quyền tối thiểu duy nhất `Actions: Read and write`).
+  7. Xuất bản artifact bất biến. Workflow này không deploy Firebase và không kích hoạt production deployment của Portal.
 
 ## 4. Tích hợp với TDTU-TKNT-Portal
 
-- `TDTU-TKNT-Portal` đăng ký ứng dụng trong `apps-registry.json` với `id: "video-encode"` và `version: "latest"`.
-- Khi Portal build, workflow sẽ tự động tải file `video-encode.zip` từ release mới nhất của repo này, giải nén vào `build/video-encode/` và triển khai lên Firebase Hosting `tknt-tdtu.web.app`.
+- `TDTU-TKNT-Portal` đăng ký ứng dụng trong `apps-registry.json` với `id: "video-encode"`, release tag và SHA-256 bất biến.
+- Portal manifest updater chỉ tạo PR khi phát hiện release mới. Sau review và merge Portal `main`, Portal tải đúng artifact đã pin, verify SHA-256, giải nén vào `build/video-encode/` và là authority duy nhất deploy Firebase Hosting `tknt-tdtu.web.app`.
 
 End-to-end auto deployment test completed.
