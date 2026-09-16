@@ -2,13 +2,7 @@ name: Release Video Encode Studio
 
 on:
   push:
-    branches: ["main"]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version (e.g. v1.2.1)'
-        required: false
-        default: ''
+    tags: ["v*"]
 
 permissions:
   contents: write
@@ -56,12 +50,9 @@ jobs:
       - name: Determine Version Tag
         id: tag
         run: |
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            TAG="${{ github.event.inputs.version }}"
-          else
-            PKG_VER=$(node -p "require('./package.json').version")
-            TAG="v${PKG_VER}"
-          fi
+          TAG="${GITHUB_REF_NAME}"
+          PKG_VER=$(node -p "require('./package.json').version")
+          test "$TAG" = "v$PKG_VER" || (echo "Tag $TAG must match package version v$PKG_VER" && exit 1)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Release tag: $TAG"
 

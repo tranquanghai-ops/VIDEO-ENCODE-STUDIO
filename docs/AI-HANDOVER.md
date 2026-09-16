@@ -17,7 +17,7 @@
 ## 3. Quy trình Tự động Đóng gói & Phát hành (CI/CD)
 
 - **Workflow:** `.github/workflows/release.yml`
-- **Cơ chế:** Kích hoạt tự động khi push code lên nhánh `main`.
+- **Cơ chế:** Kích hoạt khi push immutable release tag `vX.Y.Z` khớp với `package.json`.
 - **Các bước thực hiện:**
   1. Kiểm tra mã nguồn.
   2. Thiết lập môi trường Node.js 20.
