@@ -41,6 +41,7 @@ interface BatchSubtitleStudioProps {
   selectedModel: string;
   onModelChange: (model: string) => void;
   onOpenKeyModal: () => void;
+  onEmergencyStopEngine: () => void;
 }
 
 const LANGUAGES = [
@@ -60,7 +61,7 @@ const LANGUAGES = [
 
 export interface VideoSubtitleState {
   checked: boolean;
-  status: 'idle' | 'extracting' | 'processing' | 'done' | 'error';
+  status: 'idle' | 'extracting' | 'processing' | 'done' | 'error' | 'stopped';
   statusText: string;
   progressPercent: number;
   chunkProgress?: string;
@@ -69,6 +70,7 @@ export interface VideoSubtitleState {
   srtContent?: string;
   errorMessage?: string;
   languageUsed?: string;
+  logs?: string[];
 }
 
 const formatTime = (seconds: number) => {
@@ -87,7 +89,8 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
   isConnected,
   selectedModel,
   onModelChange,
-  onOpenKeyModal
+  onOpenKeyModal,
+  onEmergencyStopEngine
 }) => {
   // Batch settings
   const [sourceLang, setSourceLang] = useState<string>('auto'); // Mặc định AUTO DETECT
@@ -100,6 +103,9 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
   const [previewModal, setPreviewModal] = useState<{ filename: string; srt: string } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const stopRequestedRef = useRef(false);
+  const activeVideoIdRef = useRef<string | null>(null);
   const [isDragging, setIsDragging] = useState<boolean>(false);
 
   // Synchronize subtitle states whenever videos list changes
@@ -132,6 +138,23 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
     }));
   };
 
+  const appendLog = (id: string, message: string) => {
+    const timestamp = new Date().toLocaleTimeString('vi-VN', { hour12: false });
+    setSubStates((prev) => {
+      const current = prev[id] || { checked: true, status: 'idle', statusText: 'Chờ xử lý', progressPercent: 0 };
+      return {
+        ...prev,
+        [id]: { ...current, logs: [...(current.logs || []), `[${timestamp}] ${message}`].slice(-80) }
+      };
+    });
+  };
+
+  const ensureNotStopped = (signal: AbortSignal) => {
+    if (stopRequestedRef.current || signal.aborted) {
+      throw new DOMException('Đã dừng theo yêu cầu.', 'AbortError');
+    }
+  };
+
   const toggleCheck = (id: string) => {
     setSubStates((prev) => ({
       ...prev,
@@ -153,11 +176,15 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
   };
 
   // Helper xử lý 1 video
-  const processSingleVideo = async (video: VideoItem, isResume: boolean = false) => {
+  const processSingleVideo = async (video: VideoItem, signal: AbortSignal, isResume: boolean = false) => {
     const currentState = subStates[video.id];
     let chunks: ExtractedChunk[] = currentState?.cachedChunks || [];
+    activeVideoIdRef.current = video.id;
+    if (!isResume) updateVideoSubState(video.id, { logs: [] });
+    appendLog(video.id, isResume ? 'Bắt đầu thử lại tác vụ.' : 'Bắt đầu tạo phụ đề.');
 
     try {
+      ensureNotStopped(signal);
       // 1. Trích xuất âm thanh và phân đoạn nếu chưa có chunks
       if (!isResume || chunks.length === 0) {
         updateVideoSubState(video.id, {
@@ -167,17 +194,26 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
           errorMessage: undefined
         });
 
+        appendLog(video.id, 'Đang đọc thời lượng và lập kế hoạch chia đoạn audio.');
         const dur = video.duration > 0 ? video.duration : await getVideoDuration(video.file);
+        ensureNotStopped(signal);
         const plans: ChunkPlan[] = calculateChunkPlan(dur, DEFAULT_CHUNK_CONFIG);
+        appendLog(video.id, `Đã chia thành ${plans.length} đoạn audio; đang nạp FFmpeg.`);
         const ffmpeg = await ffmpegLoader();
+        ensureNotStopped(signal);
+        appendLog(video.id, 'FFmpeg đã sẵn sàng; bắt đầu trích xuất audio.');
 
         chunks = await extractAndChunkAudio(ffmpeg, video.file, plans, (msg, pct) => {
+          if (stopRequestedRef.current || signal.aborted) return;
           updateVideoSubState(video.id, {
             statusText: msg,
             progressPercent: Math.round(pct * 0.3) // 0% - 30%
           });
+          appendLog(video.id, msg);
         });
 
+        ensureNotStopped(signal);
+        appendLog(video.id, `Đã trích xuất ${chunks.length} đoạn audio.`);
         updateVideoSubState(video.id, { cachedChunks: chunks });
       }
 
@@ -195,6 +231,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
       const tgtLangObj = LANGUAGES.find((l) => l.code === targetLang);
 
       for (let i = 0; i < totalChunks; i++) {
+        ensureNotStopped(signal);
         const chunk = chunks[i];
 
         // Nếu đã có kết quả thành công trước đó thì bỏ qua (resume)
@@ -204,6 +241,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
         }
 
         const chunkIndex = i + 1;
+        appendLog(video.id, `Đang gửi đoạn ${chunkIndex}/${totalChunks} tới Gemini.`);
         updateVideoSubState(video.id, {
           statusText: `Đang xử lý đoạn ${chunkIndex}/${totalChunks}...`,
           chunkProgress: `Đoạn ${chunkIndex}/${totalChunks}`,
@@ -224,8 +262,11 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
           apiKey,
           (noticeMsg) => {
             updateVideoSubState(video.id, { statusText: noticeMsg });
-          }
+            appendLog(video.id, noticeMsg);
+          },
+          signal
         );
+        ensureNotStopped(signal);
 
         const rIdx = results.findIndex((r) => r.chunkId === chunk.id);
         if (rIdx >= 0) results[rIdx] = res;
@@ -236,9 +277,12 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
         if (res.status === 'error') {
           throw new Error(`Lỗi tại đoạn ${chunkIndex}/${totalChunks}: ${res.errorMessage || 'Gemini không phản hồi'}`);
         }
+        appendLog(video.id, `Hoàn thành đoạn ${chunkIndex}/${totalChunks}${res.modelUsed ? ` bằng ${res.modelUsed}` : ''}.`);
       }
 
       // 3. Hoàn tất đóng gói SRT và dọn dẹp RAM
+      ensureNotStopped(signal);
+      appendLog(video.id, 'Đang ghép kết quả và đóng gói file SRT.');
       updateVideoSubState(video.id, { statusText: 'Đang hoàn tất đóng gói file SRT...' });
       const srt = assembleChunksToSrt(results, DEFAULT_CHUNK_CONFIG.overlapSeconds);
 
@@ -252,13 +296,26 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
         languageUsed: langCode,
         cachedChunks: undefined // Giải phóng audio blobs trong RAM
       });
+      appendLog(video.id, 'Hoàn thành file SRT.');
     } catch (err: any) {
+      if (err?.name === 'AbortError' || signal.aborted || stopRequestedRef.current) {
+        updateVideoSubState(video.id, {
+          status: 'stopped',
+          statusText: '■ Đã dừng khẩn cấp',
+          errorMessage: undefined
+        });
+        appendLog(video.id, 'Đã dừng khẩn cấp theo yêu cầu của người dùng.');
+        return;
+      }
       console.error(`[BatchSubtitle] Lỗi xử lý video ${video.file.name}:`, err);
       updateVideoSubState(video.id, {
         status: 'error',
         statusText: '⚠ Lỗi',
         errorMessage: err.message || 'Đã xảy ra lỗi khi tạo phụ đề.'
       });
+      appendLog(video.id, `Lỗi: ${err.message || 'Đã xảy ra lỗi khi tạo phụ đề.'}`);
+    } finally {
+      if (activeVideoIdRef.current === video.id) activeVideoIdRef.current = null;
     }
   };
 
@@ -275,15 +332,32 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
       return;
     }
 
+    stopRequestedRef.current = false;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setIsBatchRunning(true);
 
-    // Xử lý LẦN LƯỢT từng video để tối ưu RAM và tránh 429
-    for (const video of checkedVideos) {
-      // Nếu video đã hoàn thành thì không chạy lại
-      if (subStates[video.id]?.status === 'done') continue;
-      await processSingleVideo(video, false);
+    try {
+      // Xử lý LẦN LƯỢT từng video để tối ưu RAM và tránh 429
+      for (const video of checkedVideos) {
+        if (controller.signal.aborted || stopRequestedRef.current) break;
+        // Nếu video đã hoàn thành thì không chạy lại
+        if (subStates[video.id]?.status === 'done') continue;
+        await processSingleVideo(video, controller.signal, false);
+      }
+    } finally {
+      if (abortControllerRef.current === controller) abortControllerRef.current = null;
+      setIsBatchRunning(false);
     }
+  };
 
+  const handleEmergencyStop = () => {
+    if (!isBatchRunning) return;
+    stopRequestedRef.current = true;
+    const activeId = activeVideoIdRef.current;
+    if (activeId) appendLog(activeId, 'Đang thực hiện lệnh dừng khẩn cấp…');
+    abortControllerRef.current?.abort();
+    onEmergencyStopEngine();
     setIsBatchRunning(false);
   };
 
@@ -293,9 +367,16 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
       onOpenKeyModal();
       return;
     }
+    stopRequestedRef.current = false;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setIsBatchRunning(true);
-    await processSingleVideo(video, true);
-    setIsBatchRunning(false);
+    try {
+      await processSingleVideo(video, controller.signal, true);
+    } finally {
+      if (abortControllerRef.current === controller) abortControllerRef.current = null;
+      setIsBatchRunning(false);
+    }
   };
 
   // Tải file SRT đơn lẻ
@@ -625,6 +706,25 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
           >
             {isBatchRunning ? 'Đang xử lý tuần tự...' : `TẠO PHỤ ĐỀ CHO ${checkedCount} VIDEO ➔`}
           </button>
+          {isBatchRunning && (
+            <button
+              type="button"
+              onClick={handleEmergencyStop}
+              style={{
+                background: '#b91c1c',
+                color: '#ffffff',
+                border: 'none',
+                padding: '0.55rem 1.15rem',
+                borderRadius: '8px',
+                fontSize: '0.88rem',
+                fontWeight: 800,
+                cursor: 'pointer',
+                boxShadow: '0 2px 5px rgba(185,28,28,0.25)'
+              }}
+            >
+              ■ DỪNG KHẨN CẤP
+            </button>
+          )}
         </div>
       </div>
 
@@ -683,6 +783,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
 
             const isDone = st.status === 'done';
             const isError = st.status === 'error';
+            const isStopped = st.status === 'stopped';
             const isWorking = st.status === 'extracting' || st.status === 'processing';
 
             return (
@@ -690,7 +791,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                 key={video.id}
                 style={{
                   background: '#ffffff',
-                  border: isDone ? '1px solid #a7f3d0' : isError ? '1px solid #fecaca' : '1px solid #e2e8f0',
+                  border: isDone ? '1px solid #a7f3d0' : isError ? '1px solid #fecaca' : isStopped ? '1px solid #fcd34d' : '1px solid #e2e8f0',
                   borderRadius: '10px',
                   padding: '1rem',
                   boxShadow: '0 1px 4px rgba(0,0,0,0.03)'
@@ -742,8 +843,8 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                       fontWeight: 600,
                       padding: '0.25rem 0.65rem',
                       borderRadius: '20px',
-                      background: isDone ? '#dcfce7' : isError ? '#fee2e2' : isWorking ? '#e0f2fe' : '#f1f5f9',
-                      color: isDone ? '#15803d' : isError ? '#b91c1c' : isWorking ? '#0369a1' : '#475569'
+                      background: isDone ? '#dcfce7' : isError ? '#fee2e2' : isStopped ? '#fef3c7' : isWorking ? '#e0f2fe' : '#f1f5f9',
+                      color: isDone ? '#15803d' : isError ? '#b91c1c' : isStopped ? '#92400e' : isWorking ? '#0369a1' : '#475569'
                     }}>
                       {st.statusText}
                     </span>
@@ -854,6 +955,28 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                   }}>
                     {st.errorMessage}
                   </div>
+                )}
+
+                {!!st.logs?.length && (
+                  <details open={isWorking} style={{ marginTop: '0.65rem' }}>
+                    <summary style={{ cursor: 'pointer', color: '#475569', fontSize: '0.78rem', fontWeight: 700 }}>
+                      Nhật ký tiến trình ({st.logs.length})
+                    </summary>
+                    <div style={{
+                      marginTop: '0.45rem',
+                      maxHeight: '150px',
+                      overflowY: 'auto',
+                      padding: '0.55rem 0.7rem',
+                      borderRadius: '6px',
+                      background: '#0f172a',
+                      color: '#dbeafe',
+                      fontFamily: 'Consolas, "Courier New", monospace',
+                      fontSize: '0.72rem',
+                      lineHeight: 1.55
+                    }}>
+                      {st.logs.map((line, index) => <div key={`${index}-${line}`}>{line}</div>)}
+                    </div>
+                  </details>
                 )}
               </div>
             );
