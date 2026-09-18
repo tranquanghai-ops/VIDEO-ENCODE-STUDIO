@@ -104,7 +104,7 @@ const defaults: Settings = {
   resolution: "source", customWidth: 1920, customHeight: 1080, aspect: "source",
 };
 
-const APP_VERSION = "1.6.0";
+const APP_VERSION = "1.7.0";
 const accepted = ".mp4,.mov,.avi,.wmv,.webm,.mkv,.m4v,.mpeg,.mpg";
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const makeSegment = (start: number, end: number): TrimSegment => ({ id: makeId(), start, end, enabled: true });
