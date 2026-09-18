@@ -23,54 +23,112 @@ import type { ExtractedChunk } from './audioExtractor';
 const STORAGE_KEY_SESSION = 'tdtu_gemini_api_key_session';
 const STORAGE_KEY_LOCAL = 'tdtu_gemini_api_key_local';
 const STORAGE_KEY_TYPE = 'tdtu_gemini_storage_type';
+const STORAGE_KEY_SESSION_PROFILES = 'tdtu_gemini_keyring_session';
+const STORAGE_KEY_LOCAL_PROFILES = 'tdtu_gemini_keyring_local';
+const STORAGE_KEY_ACTIVE_ID = 'tdtu_gemini_keyring_active';
+
+export interface GeminiKeyProfile {
+  id: string;
+  name: string;
+  key: string;
+  type: 'session' | 'local';
+  createdAt: number;
+}
 
 export interface StoredKeyInfo {
   key: string;
   type: 'session' | 'local' | 'none';
+  id?: string;
+  name?: string;
+  count: number;
+}
+
+const makeKeyId = () => `gemini-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const notifyKeyringChanged = () => { try { window.dispatchEvent(new Event('tdtu-gemini-keyring-change')); } catch { /* non-browser context */ } };
+const readProfiles = (storage: Storage, storageKey: string, type: 'session' | 'local'): GeminiKeyProfile[] => {
+  try {
+    const value = JSON.parse(storage.getItem(storageKey) || '[]');
+    if (!Array.isArray(value)) return [];
+    return value.filter((item) => item && typeof item.key === 'string' && item.key.trim()).map((item) => ({
+      id: typeof item.id === 'string' ? item.id : makeKeyId(),
+      name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : 'Gemini API',
+      key: item.key.trim(), type, createdAt: Number(item.createdAt) || Date.now()
+    }));
+  } catch { return []; }
+};
+const writeProfiles = (profiles: GeminiKeyProfile[], type: 'session' | 'local') => {
+  const storage = type === 'local' ? localStorage : sessionStorage;
+  storage.setItem(type === 'local' ? STORAGE_KEY_LOCAL_PROFILES : STORAGE_KEY_SESSION_PROFILES, JSON.stringify(profiles.filter((profile) => profile.type === type)));
+};
+
+export function getStoredApiKeys(): GeminiKeyProfile[] {
+  try {
+    const profiles = [
+      ...readProfiles(sessionStorage, STORAGE_KEY_SESSION_PROFILES, 'session'),
+      ...readProfiles(localStorage, STORAGE_KEY_LOCAL_PROFILES, 'local')
+    ];
+    if (profiles.length) return profiles;
+    const legacySession = sessionStorage.getItem(STORAGE_KEY_SESSION)?.trim();
+    const legacyLocal = localStorage.getItem(STORAGE_KEY_LOCAL)?.trim();
+    const legacyKey = legacySession || legacyLocal;
+    if (!legacyKey) return [];
+    const type = legacySession ? 'session' : 'local';
+    const migrated: GeminiKeyProfile = { id: makeKeyId(), name: 'Gemini API cũ', key: legacyKey, type, createdAt: Date.now() };
+    writeProfiles([migrated], type); localStorage.setItem(STORAGE_KEY_ACTIVE_ID, migrated.id);
+    return [migrated];
+  } catch { return []; }
 }
 
 /**
  * Lấy API key hiện được lưu trữ
  */
 export function getStoredApiKey(): StoredKeyInfo {
-  try {
-    const sessionKey = sessionStorage.getItem(STORAGE_KEY_SESSION);
-    if (sessionKey && sessionKey.trim()) {
-      return { key: sessionKey.trim(), type: 'session' };
-    }
-    const localKey = localStorage.getItem(STORAGE_KEY_LOCAL);
-    if (localKey && localKey.trim()) {
-      return { key: localKey.trim(), type: 'local' };
-    }
-  } catch (e) {
-    // Ignore storage access errors
-  }
-  return { key: '', type: 'none' };
+  const profiles = getStoredApiKeys();
+  let activeId = '';
+  try { activeId = localStorage.getItem(STORAGE_KEY_ACTIVE_ID) || ''; } catch { /* storage unavailable */ }
+  const active = profiles.find((profile) => profile.id === activeId) || profiles[0];
+  return active ? { key: active.key, type: active.type, id: active.id, name: active.name, count: profiles.length } : { key: '', type: 'none', count: 0 };
 }
 
 /**
  * Lưu API key an toàn theo lựa chọn người dùng
  */
-export function saveStoredApiKey(key: string, remember: boolean): void {
+export function saveStoredApiKey(key: string, remember: boolean, name: string = 'Gemini API'): GeminiKeyProfile | undefined {
   const cleanKey = key.trim();
   if (!cleanKey) {
-    clearStoredApiKey();
-    return;
+    return undefined;
   }
 
   try {
-    if (remember) {
-      localStorage.setItem(STORAGE_KEY_LOCAL, cleanKey);
-      localStorage.setItem(STORAGE_KEY_TYPE, 'local');
-      sessionStorage.removeItem(STORAGE_KEY_SESSION);
-    } else {
-      sessionStorage.setItem(STORAGE_KEY_SESSION, cleanKey);
-      sessionStorage.setItem(STORAGE_KEY_TYPE, 'session');
-      localStorage.removeItem(STORAGE_KEY_LOCAL);
-    }
-  } catch (e) {
-    // Fallback nếu storage bị chặn
-  }
+    const type = remember ? 'local' : 'session';
+    const all = getStoredApiKeys();
+    const existing = all.find((profile) => profile.key === cleanKey);
+    const profile: GeminiKeyProfile = existing
+      ? { ...existing, name: name.trim() || existing.name, type }
+      : { id: makeKeyId(), name: name.trim() || `Gemini API ${all.length + 1}`, key: cleanKey, type, createdAt: Date.now() };
+    const next = all.filter((item) => item.id !== profile.id);
+    next.push(profile);
+    writeProfiles(next, 'session'); writeProfiles(next, 'local');
+    localStorage.setItem(STORAGE_KEY_ACTIVE_ID, profile.id);
+    notifyKeyringChanged();
+    return profile;
+  } catch { return undefined; }
+}
+
+export function setActiveStoredApiKey(id: string): StoredKeyInfo {
+  try { localStorage.setItem(STORAGE_KEY_ACTIVE_ID, id); } catch { /* storage unavailable */ }
+  notifyKeyringChanged();
+  return getStoredApiKey();
+}
+
+export function removeStoredApiKey(id: string): StoredKeyInfo {
+  try {
+    const next = getStoredApiKeys().filter((profile) => profile.id !== id);
+    writeProfiles(next, 'session'); writeProfiles(next, 'local');
+    if (localStorage.getItem(STORAGE_KEY_ACTIVE_ID) === id) localStorage.removeItem(STORAGE_KEY_ACTIVE_ID);
+  } catch { /* storage unavailable */ }
+  notifyKeyringChanged();
+  return getStoredApiKey();
 }
 
 /**
@@ -82,6 +140,10 @@ export function clearStoredApiKey(): void {
     sessionStorage.removeItem(STORAGE_KEY_TYPE);
     localStorage.removeItem(STORAGE_KEY_LOCAL);
     localStorage.removeItem(STORAGE_KEY_TYPE);
+    sessionStorage.removeItem(STORAGE_KEY_SESSION_PROFILES);
+    localStorage.removeItem(STORAGE_KEY_LOCAL_PROFILES);
+    localStorage.removeItem(STORAGE_KEY_ACTIVE_ID);
+    notifyKeyringChanged();
   } catch (e) {}
 }
 
@@ -182,6 +244,20 @@ export interface ChunkProcessResult {
  */
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function getApiKeyCandidates(preferredKey: string): GeminiKeyProfile[] {
+  const stored = getStoredApiKeys();
+  const activeId = getStoredApiKey().id;
+  const active = stored.find((profile) => profile.id === activeId);
+  const preferred = stored.find((profile) => profile.key === preferredKey);
+  const ordered = active
+    ? [active, ...stored.filter((profile) => profile.id !== active.id)]
+    : preferred ? [preferred, ...stored.filter((profile) => profile.id !== preferred.id)] : stored;
+  if (preferredKey && ordered.length === 0) {
+    ordered.unshift({ id: 'current', name: 'Khóa đang dùng', key: preferredKey, type: 'session', createdAt: 0 });
+  }
+  return ordered;
+}
+
 /**
  * Gọi Gemini API cho một chunk âm thanh đơn lẻ với xử lý Structured JSON và 429 Retry
  */
@@ -194,6 +270,7 @@ export async function processAudioChunk(
   const modelChain = config.modelId === AUTO_MODEL_ID
     ? getAutoModelFallbackChain()
     : [config.modelId];
+  const keyCandidates = getApiKeyCandidates(apiKey);
 
   let lastError = 'Không thể xử lý đoạn âm thanh này.';
   let successfulModel = '';
@@ -257,20 +334,30 @@ export async function processAudioChunk(
     let attempt = 0;
     let success = false;
     let rawResponseText = '';
+    let keyIndex = 0;
 
     while (attempt <= backoffDelays.length && !success) {
       try {
+        const keyProfile = keyCandidates[keyIndex];
+        if (!keyProfile) throw new Error('Không còn Gemini API Key khả dụng.');
         const response = await fetch(endpoint, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-goog-api-key': apiKey
+            'x-goog-api-key': keyProfile.key
           },
           body: JSON.stringify(payload)
         });
 
         if (response.status === 429) {
-          if (attempt < backoffDelays.length) {
+          if (keyIndex < keyCandidates.length - 1) {
+            keyIndex++;
+            attempt = 0;
+            const nextKey = keyCandidates[keyIndex];
+            if (nextKey.id !== 'current') setActiveStoredApiKey(nextKey.id);
+            if (onRetryNotice) onRetryNotice(`Khóa “${keyProfile.name}” đã hết hạn mức. Đang tự chuyển sang “${nextKey.name}”…`);
+            continue;
+          } else if (attempt < backoffDelays.length) {
             const waitMs = backoffDelays[attempt];
             const waitSec = waitMs / 1000;
             attempt++;
@@ -284,6 +371,15 @@ export async function processAudioChunk(
           } else {
             throw new Error('Gemini API đã đạt giới hạn quota (429) sau ' + backoffDelays.length + ' lần thử lại.');
           }
+        }
+
+        if ((response.status === 400 || response.status === 401 || response.status === 403) && keyIndex < keyCandidates.length - 1) {
+          keyIndex++;
+          attempt = 0;
+          const nextKey = keyCandidates[keyIndex];
+          if (nextKey.id !== 'current') setActiveStoredApiKey(nextKey.id);
+          if (onRetryNotice) onRetryNotice(`Khóa “${keyProfile.name}” không còn hợp lệ. Đang tự chuyển sang “${nextKey.name}”…`);
+          continue;
         }
 
         if (!response.ok) {
@@ -300,6 +396,7 @@ export async function processAudioChunk(
         const data = await response.json();
         rawResponseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
         success = true;
+        if (keyProfile.id !== 'current') setActiveStoredApiKey(keyProfile.id);
         successfulModel = currentModel;
         break;
       } catch (err: any) {

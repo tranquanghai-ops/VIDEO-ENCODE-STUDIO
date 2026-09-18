@@ -1,9 +1,9 @@
-import { ChangeEvent, DragEvent, useMemo, useRef, useState, useEffect } from "react";
+import { ChangeEvent, DragEvent, PointerEvent as ReactPointerEvent, useMemo, useRef, useState, useEffect } from "react";
 import type { FFmpeg as FFmpegType } from "@ffmpeg/ffmpeg";
 import { HeaderGeminiStatus } from "./components/HeaderGeminiStatus";
 import { GeminiKeyModal } from "./components/GeminiKeyModal";
 import { BatchSubtitleStudio } from "./components/BatchSubtitleStudio";
-import { getStoredApiKey, clearStoredApiKey } from "./services/geminiSubtitle";
+import { getStoredApiKey, clearStoredApiKey, type GeminiKeyProfile } from "./services/geminiSubtitle";
 import { AUTO_MODEL_ID } from "./services/modelRegistry";
 
 type Status = "ready" | "queued" | "encoding" | "done" | "error" | "stopped";
@@ -82,7 +82,9 @@ type VideoItem = {
   status: Status;
   progress: number;
   settings: Settings;
+  trimEnabled: boolean;
   segments: TrimSegment[];
+  activeSegmentId?: string;
   segmentOutputs?: SegmentOutput[];
   outputUrl?: string;
   outputName?: string;
@@ -101,7 +103,7 @@ const defaults: Settings = {
   resolution: "source", customWidth: 1920, customHeight: 1080, aspect: "source",
 };
 
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 const accepted = ".mp4,.mov,.avi,.wmv,.webm,.mkv,.m4v,.mpeg,.mpg";
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const makeSegment = (start: number, end: number): TrimSegment => ({ id: makeId(), start, end, enabled: true });
@@ -113,6 +115,7 @@ const timeParts = (value: number) => {
   if (seconds >= 60) { minutes += 1; seconds = 0; }
   return { minutes, seconds };
 };
+const segmentColors = ["#ef8d2f", "#1767d2", "#137d70", "#9b59b6", "#d94f70", "#6f7b18"];
 const formatBytes = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(n < 1e6 ? 2 : 1)} MB`;
 const formatBitrate = (n?: number) => !n ? "—" : n >= 1e6 ? `${(n / 1e6).toFixed(1)} Mbps` : `${Math.round(n / 1000)} kbps`;
 const formatTime = (s: number) => {
@@ -292,17 +295,21 @@ function parseFfmpegInfo(lines: string[], item: VideoItem, ext: string) {
 export default function App() {
   const [activeTab, setActiveTab] = useState<"encode" | "subtitle">("encode");
   const [apiKey, setApiKey] = useState<string>("");
+  const [apiKeyName, setApiKeyName] = useState<string>("");
+  const [apiKeyCount, setApiKeyCount] = useState(0);
   const [keyStorageType, setKeyStorageType] = useState<"session" | "local" | "none">("none");
   const [selectedModel, setSelectedModel] = useState<string>(AUTO_MODEL_ID);
   const [showKeyModal, setShowKeyModal] = useState<boolean>(false);
   const [userEmail, setUserEmail] = useState<string | undefined>(undefined);
 
-  useEffect(() => {
+  const syncStoredKeyState = () => {
     const stored = getStoredApiKey();
-    if (stored.key) {
-      setApiKey(stored.key);
-      setKeyStorageType(stored.type);
-    }
+    setApiKey(stored.key); setApiKeyName(stored.name || ""); setApiKeyCount(stored.count); setKeyStorageType(stored.type);
+  };
+
+  useEffect(() => {
+    syncStoredKeyState();
+    window.addEventListener("tdtu-gemini-keyring-change", syncStoredKeyState);
     try {
       const userStr = localStorage.getItem("tdtu_user") || sessionStorage.getItem("tdtu_user");
       if (userStr) {
@@ -310,18 +317,19 @@ export default function App() {
         if (parsed.email) setUserEmail(parsed.email);
       }
     } catch { /* ignore */ }
+    return () => window.removeEventListener("tdtu-gemini-keyring-change", syncStoredKeyState);
   }, []);
 
   const handleDisconnectKey = () => {
+    if (!window.confirm("Xóa toàn bộ Gemini API Key đã lưu trên trình duyệt này?")) return;
     clearStoredApiKey();
     setApiKey("");
+    setApiKeyName(""); setApiKeyCount(0);
     setKeyStorageType("none");
   };
 
-  const handleConnectedKey = (key: string, storageType: "session" | "local") => {
-    setApiKey(key);
-    setKeyStorageType(storageType);
-    setShowKeyModal(false);
+  const handleConnectedKey = (profile: GeminiKeyProfile, count: number) => {
+    setApiKey(profile.key); setApiKeyName(profile.name); setApiKeyCount(count); setKeyStorageType(profile.type);
   };
 
   const [videos, setVideos] = useState<VideoItem[]>([]);
@@ -342,6 +350,7 @@ export default function App() {
   const templateSettingsRef = useRef<Settings>({ ...defaults });
 
   const selected = useMemo(() => videos.find((v) => v.id === selectedId) ?? videos[0], [videos, selectedId]);
+  const activeSegment = selected?.segments.find((segment) => segment.id === selected.activeSegmentId) || selected?.segments[0];
   const checkedCount = videos.filter((v) => v.checked).length;
   const doneCount = videos.filter((v) => v.status === "done").length;
   const failedVideos = videos.filter((v) => v.status === "error");
@@ -426,7 +435,8 @@ export default function App() {
     if (!list.length) { setNotice("Không tìm thấy tệp video phù hợp."); return; }
     const prepared = await Promise.all(list.map(async (file): Promise<VideoItem> => {
       const meta = await readBrowserMetadata(file);
-      return { id: makeId(), file, ...meta, checked: true, analysisStatus: "pending", thumbnails: [], status: "ready", progress: 0, settings: { ...templateSettingsRef.current }, segments: [makeSegment(0, meta.duration || 0)] };
+      const firstSegment = makeSegment(0, meta.duration || 0);
+      return { id: makeId(), file, ...meta, checked: true, analysisStatus: "pending", thumbnails: [], status: "ready", progress: 0, settings: { ...templateSettingsRef.current }, trimEnabled: false, segments: [firstSegment], activeSegmentId: firstSegment.id };
     }));
     setVideos((old) => [...old, ...prepared]); setSelectedId((old) => old ?? prepared[0].id);
     setNotice(`Đã thêm ${prepared.length} video. Đang đọc codec và tạo thumbnail…`);
@@ -477,11 +487,46 @@ export default function App() {
     const lastEnd = selected.segments.at(-1)?.end || 0;
     const start = lastEnd < duration - 0.1 ? lastEnd : 0;
     const end = Math.min(duration, start + Math.min(30, duration || 30));
-    setVideos((items) => items.map((item) => item.id === selected.id ? { ...item, segments: [...item.segments, makeSegment(start, Math.max(start + 0.1, end))] } : item));
+    const segment = makeSegment(start, Math.max(start + 0.1, end));
+    setVideos((items) => items.map((item) => item.id === selected.id ? { ...item, segments: [...item.segments, segment], activeSegmentId: segment.id } : item));
   };
   const removeSegment = (segmentId: string) => {
     if (!selected || selected.segments.length === 1) return;
-    setVideos((items) => items.map((item) => item.id === selected.id ? { ...item, segments: item.segments.filter((segment) => segment.id !== segmentId) } : item));
+    setVideos((items) => items.map((item) => {
+      if (item.id !== selected.id) return item;
+      const segments = item.segments.filter((segment) => segment.id !== segmentId);
+      return { ...item, segments, activeSegmentId: item.activeSegmentId === segmentId ? segments[0]?.id : item.activeSegmentId };
+    }));
+  };
+  const toggleTrimEnabled = (enabled: boolean) => {
+    if (!selected) return;
+    setVideos((items) => items.map((item) => item.id === selected.id ? { ...item, trimEnabled: enabled, activeSegmentId: item.activeSegmentId || item.segments[0]?.id } : item));
+  };
+  const selectSegment = (segmentId: string) => {
+    if (!selected) return;
+    setVideos((items) => items.map((item) => item.id === selected.id ? { ...item, activeSegmentId: segmentId } : item));
+  };
+  const beginSegmentDrag = (event: ReactPointerEvent<HTMLElement>, segment: TrimSegment, mode: "move" | "start" | "end") => {
+    if (!selected?.duration) return;
+    event.preventDefault(); event.stopPropagation(); selectSegment(segment.id);
+    const track = event.currentTarget.closest(".multi-trim-track") as HTMLElement | null;
+    if (!track) return;
+    const originX = event.clientX, duration = selected.duration, originalStart = segment.start, originalEnd = segment.end;
+    const width = Math.max(1, track.getBoundingClientRect().width);
+    const onMove = (moveEvent: PointerEvent) => {
+      const delta = (moveEvent.clientX - originX) / width * duration;
+      if (mode === "move") {
+        const length = originalEnd - originalStart;
+        const start = Math.min(Math.max(0, originalStart + delta), duration - length);
+        updateSegment(segment.id, { start, end: start + length });
+      } else if (mode === "start") {
+        updateSegment(segment.id, { start: Math.min(originalEnd - 0.1, Math.max(0, originalStart + delta)) });
+      } else {
+        updateSegment(segment.id, { end: Math.max(originalStart + 0.1, Math.min(duration, originalEnd + delta)) });
+      }
+    };
+    const onUp = () => { window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp); };
+    window.addEventListener("pointermove", onMove); window.addEventListener("pointerup", onUp, { once: true });
   };
   const applyToAll = () => {
     if (!selected) return;
@@ -614,7 +659,9 @@ export default function App() {
   };
 
   const encodeOne = async (item: VideoItem, mode: "combined" | "individual" = "combined") => {
-    const segments = item.segments.filter((segment) => segment.enabled && segment.end - segment.start >= 0.1);
+    const segments = item.trimEnabled
+      ? item.segments.filter((segment) => segment.enabled && segment.end - segment.start >= 0.1)
+      : [{ id: `${item.id}-full`, start: 0, end: item.duration, enabled: true }];
     if (!segments.length) { setNotice("Hãy bật ít nhất một đoạn cắt hợp lệ trước khi xuất video."); return false; }
     cancelCurrentRef.current = false; activeIdRef.current = item.id;
     if (item.outputUrl) URL.revokeObjectURL(item.outputUrl);
@@ -800,6 +847,8 @@ export default function App() {
           <HeaderGeminiStatus
             isConnected={Boolean(apiKey)}
             keyStorageType={keyStorageType}
+            activeKeyName={apiKeyName}
+            keyCount={apiKeyCount}
             selectedModel={selectedModel}
             userEmail={userEmail}
             onOpenModal={() => setShowKeyModal(true)}
@@ -824,7 +873,7 @@ export default function App() {
           className={`tab-btn ${activeTab === "subtitle" ? "active" : ""}`}
           onClick={() => setActiveTab("subtitle")}
         >
-          <span>✨</span> TẠO PHỤ ĐỀ AI
+          <span>✨</span> Tạo phụ đề AI
           {videos.length > 0 && <span className="tab-badge">{videos.length}</span>}
         </button>
       </nav>
@@ -865,18 +914,20 @@ export default function App() {
                 <fieldset><legend>Hình ảnh</legend><label>Định dạng<select value={selected.settings.format} onChange={(e) => updateSettings({ format: e.target.value as Format })}><option value="mp4">MP4</option><option value="mov">MOV</option><option value="webm">WebM</option><option value="mkv">MKV</option></select></label><label>Video codec<select value={selected.settings.videoCodec} onChange={(e) => updateSettings({ videoCodec: e.target.value as VideoCodec })}><option value="libx264">H.264 — tương thích cao</option><option value="libvpx-vp9">VP9 — dung lượng nhỏ</option><option value="mpeg4">MPEG-4</option></select></label><label>H.264 Level<select disabled={selected.settings.videoCodec !== "libx264"} value={selected.settings.h264Level} onChange={(e) => updateSettings({ h264Level: e.target.value as H264Level })}><option value="auto">Tự động</option><option value="2.1">Level 2.1</option><option value="2.2">Level 2.2 — đầu xe đời cũ</option><option value="3.0">Level 3.0</option><option value="3.1">Level 3.1</option><option value="4.0">Level 4.0</option><option value="4.1">Level 4.1</option></select></label><label>Video bitrate<select value={selected.settings.videoBitrate} onChange={(e) => updateSettings({ videoBitrate: e.target.value })}><option value="auto">Tự động (khuyên dùng)</option><option value="100k">100 kbps — cực nhỏ</option><option value="150k">150 kbps</option><option value="200k">200 kbps</option><option value="250k">250 kbps</option><option value="300k">300 kbps — rất nhỏ</option><option value="500k">500 kbps</option><option value="800k">800 kbps — phù hợp 360p/480p</option><option value="1M">1 Mbps</option><option value="1500k">1,5 Mbps</option><option value="2M">2 Mbps</option><option value="5M">5 Mbps</option><option value="10M">10 Mbps</option><option value="20M">20 Mbps</option></select></label><small className="setting-hint">AV1 thường cần bitrate thấp hơn H.264 để đạt chất lượng tương đương.</small></fieldset>
                 <fieldset><legend>Âm thanh</legend><label>Audio codec<select value={selected.settings.audioCodec} onChange={(e) => updateSettings({ audioCodec: e.target.value as AudioCodec })}><option value="aac">AAC</option><option value="libmp3lame">MP3</option><option value="libopus">Opus</option><option value="libvorbis">Vorbis</option><option value="none">Không có âm thanh</option></select></label><label>Audio bitrate<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioBitrate} onChange={(e) => updateSettings({ audioBitrate: e.target.value })}><option value="96k">96 kbps</option><option value="128k">128 kbps</option><option value="192k">192 kbps</option><option value="256k">256 kbps</option><option value="320k">320 kbps</option></select></label><label>Số kênh<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioChannels} onChange={(e) => updateSettings({ audioChannels: e.target.value as AudioChannels })}><option value="source">Giữ nguyên{selected.sourceInfo?.audioChannels ? ` · ${selected.sourceInfo.audioChannels} kênh` : ""}</option><option value="1">Mono · 1 kênh</option><option value="2">Stereo · 2 kênh</option></select></label><label>Tần số âm thanh<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioSampleRate} onChange={(e) => updateSettings({ audioSampleRate: e.target.value as AudioSampleRate })}><option value="source">Giữ nguyên{selected.sourceInfo?.audioSampleRate ? ` · ${selected.sourceInfo.audioSampleRate} Hz` : ""}</option><option value="32000">32.000 Hz</option><option value="44100">44.100 Hz</option><option value="48000">48.000 Hz</option></select></label></fieldset>
                 <fieldset><legend>Khung hình</legend><label>Kích thước<select value={selected.settings.resolution} onChange={(e) => updateSettings({ resolution: e.target.value })}><option value="source">Giữ nguyên</option><option value="2160">4K · 3840×2160</option><option value="1080">Full HD · 1920×1080</option><option value="720">HD · 1280×720</option><option value="480">SD · 854×480</option><option value="custom">Tùy chỉnh</option></select></label><label>Tỉ lệ<select value={selected.settings.aspect} onChange={(e) => updateSettings({ aspect: e.target.value })}><option value="source">Giữ nguyên</option><option value="16:9">16:9 ngang</option><option value="9:16">9:16 dọc</option><option value="4:3">4:3</option><option value="1:1">1:1 vuông</option></select></label>{selected.settings.resolution === "custom" && <div className="dimension-row"><input aria-label="Chiều rộng" type="number" min="16" value={selected.settings.customWidth} onChange={(e) => updateSettings({ customWidth: Number(e.target.value) })}/><span>×</span><input aria-label="Chiều cao" type="number" min="16" value={selected.settings.customHeight} onChange={(e) => updateSettings({ customHeight: Number(e.target.value) })}/></div>}</fieldset>
-                <fieldset className="trim-editor"><legend>Cắt nhiều đoạn</legend>
-                  <div className="trim-editor-head"><small>Bật các đoạn muốn giữ; các đoạn sẽ được ghép theo thứ tự bên dưới.</small><button type="button" disabled={!selected.duration} onClick={addSegment}>+ Thêm đoạn</button></div>
-                  <div className="segment-list">{selected.segments.map((segment, index) => {
-                    const startPercent = selected.duration ? segment.start / selected.duration * 100 : 0;
-                    const endPercent = selected.duration ? segment.end / selected.duration * 100 : 100;
-                    return <section className={`segment-card ${segment.enabled ? "" : "disabled"}`} key={segment.id}>
-                      <div className="segment-title"><label><input type="checkbox" checked={segment.enabled} onChange={(event) => updateSegment(segment.id, { enabled: event.target.checked })} /><strong>Đoạn {index + 1}</strong></label><span>{formatTime(segment.start)} → {formatTime(segment.end)} · {formatTime(segment.end - segment.start)}</span><button type="button" disabled={selected.segments.length === 1} onClick={() => removeSegment(segment.id)}>Xóa</button></div>
-                      <div className="trim-slider" style={{ "--trim-start": `${startPercent}%`, "--trim-end": `${endPercent}%` } as React.CSSProperties}><i /><input aria-label={`Điểm bắt đầu đoạn ${index + 1}`} type="range" min="0" max={selected.duration || 0.1} step="0.1" value={segment.start} onChange={(event) => updateSegment(segment.id, { start: Number(event.target.value) })} /><input aria-label={`Điểm kết thúc đoạn ${index + 1}`} type="range" min="0" max={selected.duration || 0.1} step="0.1" value={segment.end} onChange={(event) => updateSegment(segment.id, { end: Number(event.target.value) })} /></div>
-                      <div className="trim-time-row"><TimeInput label="Bắt đầu" value={segment.start} onChange={(part, value) => updateSegmentTimePart(segment, "start", part, value)} /><TimeInput label="Kết thúc" value={segment.end} onChange={(part, value) => updateSegmentTimePart(segment, "end", part, value)} /></div>
-                    </section>;
-                  })}</div>
-                  <div className="trim-summary"><span>Video gốc: {formatTime(selected.duration)}</span><strong>Tổng thời lượng đã chọn: {formatTime(selected.segments.filter((segment) => segment.enabled).reduce((sum, segment) => sum + segment.end - segment.start, 0))}</strong></div>
+                <fieldset className={`trim-editor ${selected.trimEnabled ? "expanded" : "collapsed"}`}><legend><label className="trim-toggle"><input type="checkbox" checked={selected.trimEnabled} onChange={(event) => toggleTrimEnabled(event.target.checked)} /><span>Cắt nhiều đoạn</span></label></legend>
+                  {!selected.trimEnabled ? <button type="button" className="trim-collapsed-summary" onClick={() => toggleTrimEnabled(true)}><span>Video đang được mã hóa toàn bộ</span><b>Bật để chọn nhiều đoạn ›</b></button> : <>
+                    <div className="trim-editor-head"><small>Mỗi màu là một đoạn. Click để chọn; kéo phần giữa để di chuyển cả đoạn mà không đổi độ dài.</small><button type="button" disabled={!selected.duration} onClick={addSegment}>+ Thêm đoạn</button></div>
+                    <div className="multi-trim-track" aria-label="Timeline các đoạn cắt">{selected.segments.map((segment, index) => {
+                      const left = selected.duration ? segment.start / selected.duration * 100 : 0;
+                      const width = selected.duration ? (segment.end - segment.start) / selected.duration * 100 : 100;
+                      const color = segmentColors[index % segmentColors.length];
+                      return <div key={segment.id} role="button" tabIndex={0} aria-label={`Chọn đoạn ${index + 1}`} className={`timeline-segment ${segment.id === activeSegment?.id ? "active" : ""} ${segment.enabled ? "" : "disabled"}`} style={{ left: `${left}%`, width: `${Math.max(width, 0.5)}%`, backgroundColor: color }} onClick={() => selectSegment(segment.id)} onPointerDown={(event) => beginSegmentDrag(event, segment, "move")}><i className="handle start" onPointerDown={(event) => beginSegmentDrag(event, segment, "start")} /><span>{index + 1}</span><i className="handle end" onPointerDown={(event) => beginSegmentDrag(event, segment, "end")} /></div>;
+                    })}</div>
+                    <div className="timeline-scale"><span>0:00</span><span>{formatTime(selected.duration / 2)}</span><span>{formatTime(selected.duration)}</span></div>
+                    <div className="segment-chips">{selected.segments.map((segment, index) => <button type="button" key={segment.id} className={segment.id === activeSegment?.id ? "active" : ""} onClick={() => selectSegment(segment.id)}><i style={{ backgroundColor: segmentColors[index % segmentColors.length] }} />Đoạn {index + 1}<small>{formatTime(segment.start)}–{formatTime(segment.end)}</small></button>)}</div>
+                    {activeSegment && <section className={`active-segment-editor ${activeSegment.enabled ? "" : "disabled"}`}><div className="segment-title"><label><input type="checkbox" checked={activeSegment.enabled} onChange={(event) => updateSegment(activeSegment.id, { enabled: event.target.checked })} /><strong>Giữ đoạn {selected.segments.indexOf(activeSegment) + 1}</strong></label><span>Độ dài cố định khi kéo giữa: {formatTime(activeSegment.end - activeSegment.start)}</span><button type="button" disabled={selected.segments.length === 1} onClick={() => removeSegment(activeSegment.id)}>Xóa đoạn</button></div><div className="trim-time-row"><TimeInput label="Bắt đầu" value={activeSegment.start} onChange={(part, value) => updateSegmentTimePart(activeSegment, "start", part, value)} /><TimeInput label="Kết thúc" value={activeSegment.end} onChange={(part, value) => updateSegmentTimePart(activeSegment, "end", part, value)} /></div></section>}
+                    <div className="trim-summary"><span>Video gốc: {formatTime(selected.duration)}</span><strong>Tổng thời lượng đã chọn: {formatTime(selected.segments.filter((segment) => segment.enabled).reduce((sum, segment) => sum + segment.end - segment.start, 0))}</strong></div>
+                  </>}
                 </fieldset>
               </div>
               {selected.outputUrl && <a className="download-card" href={selected.outputUrl} download={selected.outputName}><span>✓</span><div><strong>Video đã sẵn sàng</strong><small>{selected.outputName}</small></div><b>Tải xuống</b></a>}
@@ -886,7 +937,7 @@ export default function App() {
             </section>
           </section>
 
-          <footer className="actionbar"><div className="footer-status"><span className={engineReady ? "engine ready" : "engine"}>{analyzingCount ? `Đang đọc thông tin gốc: còn ${analyzingCount} video…` : engineReady ? "Bộ mã hóa đã sẵn sàng" : engineLoading ? "Đang khởi động bộ mã hóa…" : notice}</span><small>Phát triển bởi ThS. Trần Quang Hải &amp; ChatGPT (OpenAI) · Phiên bản {APP_VERSION}</small></div><div className="actions"><button className="secondary" disabled={!selected || !videos.length || isBatchRunning} onClick={applyToAll}>Áp dụng cho tất cả tệp</button>{selected?.status === "encoding" && !isBatchRunning && <button className="danger" onClick={() => stopCurrentVideo(selected.id)}>Dừng video này</button>}{isBatchRunning ? <button className="danger" onClick={stopBatch}>Dừng hàng loạt</button> : <><button className="secondary compact" disabled={!selected || analyzingCount > 0} onClick={() => selected && void encodeOne(selected, "individual")}>Xuất từng đoạn</button><button className="secondary compact" disabled={!selected || analyzingCount > 0} onClick={() => selected && void encodeOne(selected)}>Ghép đoạn đã chọn</button><button className="primary" disabled={!checkedCount || engineLoading || analyzingCount > 0} onClick={() => void encodeChecked()}>Mã hóa {checkedCount} video <span>→</span></button></>}</div></footer>
+          <footer className="actionbar"><div className="footer-status"><span className={engineReady ? "engine ready" : "engine"}>{analyzingCount ? `Đang đọc thông tin gốc: còn ${analyzingCount} video…` : engineReady ? "Bộ mã hóa đã sẵn sàng" : engineLoading ? "Đang khởi động bộ mã hóa…" : notice}</span><small>Phát triển bởi ThS. Trần Quang Hải &amp; ChatGPT (OpenAI) · Phiên bản {APP_VERSION}</small></div><div className="actions"><button className="secondary" disabled={!selected || !videos.length || isBatchRunning} onClick={applyToAll}>Áp dụng cho tất cả tệp</button>{selected?.status === "encoding" && !isBatchRunning && <button className="danger" onClick={() => stopCurrentVideo(selected.id)}>Dừng video này</button>}{isBatchRunning ? <button className="danger" onClick={stopBatch}>Dừng hàng loạt</button> : <><button className="secondary compact" disabled={!selected?.trimEnabled || analyzingCount > 0} onClick={() => selected && void encodeOne(selected, "individual")}>Xuất từng đoạn</button><button className="secondary compact" disabled={!selected || analyzingCount > 0} onClick={() => selected && void encodeOne(selected)}>{selected?.trimEnabled ? "Ghép đoạn đã chọn" : "Mã hóa video này"}</button><button className="primary" disabled={!checkedCount || engineLoading || analyzingCount > 0} onClick={() => void encodeChecked()}>Mã hóa {checkedCount} video <span>→</span></button></>}</div></footer>
         </>
       )}
 
@@ -906,9 +957,7 @@ export default function App() {
 
       <GeminiKeyModal
         isOpen={showKeyModal}
-        initialKey={apiKey}
-        initialStorageType={keyStorageType}
-        onClose={() => setShowKeyModal(false)}
+        onClose={() => { syncStoredKeyState(); setShowKeyModal(false); }}
         onConnected={handleConnectedKey}
       />
     </main>

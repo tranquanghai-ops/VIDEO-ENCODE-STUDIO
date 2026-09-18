@@ -37,6 +37,8 @@ Không nên nhấp trực tiếp vào `dist/index.html` bằng đường dẫn `
 - Audio codec: AAC, MP3, Opus, Vorbis hoặc loại bỏ âm thanh.
 - Điều chỉnh bitrate, kích thước, tỉ lệ khung hình và cắt theo phút/giây bằng thanh kéo hai đầu.
 - Chọn nhiều đoạn trong một video; tải từng đoạn riêng hoặc ghép các đoạn theo thứ tự thành một video hoàn chỉnh.
+- Timeline chung hiển thị các đoạn bằng màu riêng; có thể kéo cả đoạn mà vẫn giữ nguyên độ dài.
+- Lưu nhiều Gemini API Key có tên riêng và tự chuyển sang key dự phòng khi key hiện tại hết hạn mức hoặc không hợp lệ.
 - Mã hóa từng video hoặc toàn bộ hàng đợi; có thể dừng tiến trình.
 
 ## Lưu ý
