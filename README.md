@@ -41,6 +41,7 @@ Không nên nhấp trực tiếp vào `dist/index.html` bằng đường dẫn `
 - Chế độ “Chỉ cắt” dùng stream copy để giữ nguyên codec/chất lượng và khóa các thiết lập mã hóa; điểm cắt có thể được căn về keyframe gần nhất.
 - Lưu nhiều Gemini API Key có tên riêng và tự chuyển sang key dự phòng khi key hiện tại hết hạn mức hoặc không hợp lệ.
 - Tạo phụ đề AI có nút dừng khẩn cấp và nhật ký thời gian thực cho từng công đoạn.
+- Cho phép gửi toàn bộ audio trong một lượt hoặc chia đều thành 2, 3, 4 lượt; khi một phần lỗi, thử lại chỉ gửi đúng phần lỗi đã được lưu trong cache.
 - Mã hóa từng video hoặc toàn bộ hàng đợi; có thể dừng tiến trình.
 
 ## Lưu ý

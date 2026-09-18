@@ -4,7 +4,7 @@
  * 
  * QUY TẮC THIẾT KẾ:
  * 1. Toàn bộ xử lý 100% trên trình duyệt với FFmpeg WASM (không tải video/audio lên Firebase/Server).
- * 2. Cấu hình phân đoạn tập trung: Video <= 30 phút (60s/chunk), > 30 phút (90s/chunk), overlap 1.5s.
+ * 2. Có thể chia tự động hoặc chia chính xác 1-4 lượt theo lựa chọn của người dùng, overlap 1.5s.
  * 3. Mỗi chunk lưu trữ id, startOffset, duration, overlap, base64, mimeType.
  */
 
@@ -68,7 +68,8 @@ export function getVideoDuration(file: File): Promise<number> {
  */
 export function calculateChunkPlan(
   totalDurationSeconds: number,
-  config: AudioChunkConfig = DEFAULT_CHUNK_CONFIG
+  config: AudioChunkConfig = DEFAULT_CHUNK_CONFIG,
+  exactParts?: number
 ): ChunkPlan[] {
   if (totalDurationSeconds <= 0) {
     return [{
@@ -81,10 +82,28 @@ export function calculateChunkPlan(
     }];
   }
 
+  const overlap = config.overlapSeconds;
+
+  if (exactParts && Number.isInteger(exactParts) && exactParts >= 1) {
+    const total = Math.min(exactParts, Math.max(1, Math.ceil(totalDurationSeconds / 0.1)));
+    const chunkDuration = (totalDurationSeconds + overlap * (total - 1)) / total;
+    const step = chunkDuration - overlap;
+    return Array.from({ length: total }, (_, id) => {
+      const startOffset = id * step;
+      return {
+        id,
+        index: id + 1,
+        total,
+        startOffset,
+        duration: Math.min(chunkDuration, totalDurationSeconds - startOffset),
+        overlap: id === 0 ? 0 : overlap
+      };
+    });
+  }
+
   const chunkDuration = totalDurationSeconds <= config.shortVideoMaxSeconds
     ? config.shortChunkDuration
     : config.longChunkDuration;
-  const overlap = config.overlapSeconds;
 
   const plans: Omit<ChunkPlan, 'total'>[] = [];
   let currentStart = 0;

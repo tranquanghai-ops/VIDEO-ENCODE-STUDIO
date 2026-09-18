@@ -96,6 +96,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
   const [sourceLang, setSourceLang] = useState<string>('auto'); // Mặc định AUTO DETECT
   const [mode, setMode] = useState<'original' | 'translate'>('original');
   const [targetLang, setTargetLang] = useState<string>('vi'); // Mặc định dịch sang Tiếng Việt
+  const [sendParts, setSendParts] = useState<1 | 2 | 3 | 4>(1);
 
   // Per-video subtitle states mapped by video.id
   const [subStates, setSubStates] = useState<Record<string, VideoSubtitleState>>({});
@@ -197,8 +198,10 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
         appendLog(video.id, 'Đang đọc thời lượng và lập kế hoạch chia đoạn audio.');
         const dur = video.duration > 0 ? video.duration : await getVideoDuration(video.file);
         ensureNotStopped(signal);
-        const plans: ChunkPlan[] = calculateChunkPlan(dur, DEFAULT_CHUNK_CONFIG);
-        appendLog(video.id, `Đã chia thành ${plans.length} đoạn audio; đang nạp FFmpeg.`);
+        const plans: ChunkPlan[] = calculateChunkPlan(dur, DEFAULT_CHUNK_CONFIG, sendParts);
+        appendLog(video.id, sendParts === 1
+          ? 'Đã chọn gửi toàn bộ audio trong 1 lượt; đang nạp FFmpeg.'
+          : `Đã chia audio thành đúng ${plans.length} phần; đang nạp FFmpeg.`);
         const ffmpeg = await ffmpegLoader();
         ensureNotStopped(signal);
         appendLog(video.id, 'FFmpeg đã sẵn sàng; bắt đầu trích xuất audio.');
@@ -588,6 +591,34 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
               ))}
             </select>
           </div>
+
+          {/* Số lượt gửi audio tới Gemini */}
+          <div>
+            <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: '#475569', marginBottom: '0.35rem' }}>
+              Cách gửi audio:
+            </label>
+            <select
+              value={sendParts}
+              onChange={(e) => setSendParts(Number(e.target.value) as 1 | 2 | 3 | 4)}
+              disabled={isBatchRunning}
+              style={{
+                width: '100%',
+                padding: '0.55rem 0.75rem',
+                borderRadius: '6px',
+                border: '1px solid #cbd5e1',
+                background: '#fff',
+                fontSize: '0.88rem'
+              }}
+            >
+              <option value={1}>Gửi tất cả trong 1 lượt</option>
+              <option value={2}>Chia đều thành 2 lượt</option>
+              <option value={3}>Chia đều thành 3 lượt</option>
+              <option value={4}>Chia đều thành 4 lượt</option>
+            </select>
+            <small style={{ display: 'block', marginTop: '0.3rem', color: '#64748b', fontSize: '0.72rem', lineHeight: 1.4 }}>
+              Nếu một phần lỗi, nút thử lại chỉ gửi lại đúng phần đó.
+            </small>
+          </div>
         </div>
       </div>
 
@@ -785,6 +816,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
             const isError = st.status === 'error';
             const isStopped = st.status === 'stopped';
             const isWorking = st.status === 'extracting' || st.status === 'processing';
+            const failedChunk = st.chunkResults?.find((result) => result.status === 'error');
 
             return (
               <div
@@ -904,7 +936,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                           cursor: isBatchRunning ? 'not-allowed' : 'pointer'
                         }}
                       >
-                        🔄 Thử lại
+                        🔄 {failedChunk ? `Thử lại phần ${failedChunk.index}/${failedChunk.total}` : 'Thử lại'}
                       </button>
                     )}
 
