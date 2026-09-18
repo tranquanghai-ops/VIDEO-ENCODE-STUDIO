@@ -4,6 +4,8 @@ import { getModelInfo } from '../services/modelRegistry';
 interface HeaderGeminiStatusProps {
   isConnected: boolean;
   keyStorageType: 'session' | 'local' | 'none';
+  activeKeyName: string;
+  keyCount: number;
   selectedModel: string;
   userEmail?: string;
   onOpenModal: () => void;
@@ -13,6 +15,8 @@ interface HeaderGeminiStatusProps {
 export const HeaderGeminiStatus: React.FC<HeaderGeminiStatusProps> = ({
   isConnected,
   keyStorageType,
+  activeKeyName,
+  keyCount,
   selectedModel,
   userEmail,
   onOpenModal,
@@ -49,7 +53,7 @@ export const HeaderGeminiStatus: React.FC<HeaderGeminiStatusProps> = ({
             fontSize: '0.76rem'
           }}>
             <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#10b981' }} />
-            Đã kết nối ({modelLabel})
+            {activeKeyName || 'Đã kết nối'} · {modelLabel}{keyCount > 1 ? ` · ${keyCount} keys` : ''}
           </span>
         ) : (
           <span style={{
@@ -74,7 +78,7 @@ export const HeaderGeminiStatus: React.FC<HeaderGeminiStatusProps> = ({
           <button
             type="button"
             onClick={onOpenModal}
-            title="Đổi Gemini API Key"
+            title="Quản lý Gemini API Key"
             style={{
               background: 'rgba(255, 255, 255, 0.15)',
               border: 'none',
@@ -87,12 +91,12 @@ export const HeaderGeminiStatus: React.FC<HeaderGeminiStatusProps> = ({
               transition: 'background 0.15s'
             }}
           >
-            Đổi key
+            Quản lý keys
           </button>
           <button
             type="button"
             onClick={onDisconnect}
-            title="Ngắt kết nối Gemini API Key"
+            title="Xóa toàn bộ Gemini API Key đã lưu"
             style={{
               background: 'rgba(239, 68, 68, 0.2)',
               border: 'none',
@@ -105,7 +109,7 @@ export const HeaderGeminiStatus: React.FC<HeaderGeminiStatusProps> = ({
               transition: 'background 0.15s'
             }}
           >
-            Ngắt kết nối
+            Xóa tất cả
           </button>
         </div>
       ) : (
