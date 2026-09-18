@@ -242,7 +242,21 @@ export interface ChunkProcessResult {
 /**
  * Trợ giúp delay cho exponential backoff
  */
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
+  if (signal?.aborted) {
+    reject(new DOMException('Đã dừng theo yêu cầu.', 'AbortError'));
+    return;
+  }
+  const timer = window.setTimeout(() => {
+    signal?.removeEventListener('abort', abort);
+    resolve();
+  }, ms);
+  const abort = () => {
+    window.clearTimeout(timer);
+    reject(new DOMException('Đã dừng theo yêu cầu.', 'AbortError'));
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+});
 
 function getApiKeyCandidates(preferredKey: string): GeminiKeyProfile[] {
   const stored = getStoredApiKeys();
@@ -265,8 +279,10 @@ export async function processAudioChunk(
   chunk: ExtractedChunk,
   config: SubtitleConfig,
   apiKey: string,
-  onRetryNotice?: (msg: string) => void
+  onRetryNotice?: (msg: string) => void,
+  signal?: AbortSignal
 ): Promise<ChunkProcessResult> {
+  signal?.throwIfAborted();
   const modelChain = config.modelId === AUTO_MODEL_ID
     ? getAutoModelFallbackChain()
     : [config.modelId];
@@ -276,6 +292,7 @@ export async function processAudioChunk(
   let successfulModel = '';
 
   for (const currentModel of modelChain) {
+    signal?.throwIfAborted();
     const endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/' + currentModel + ':generateContent';
 
     // Xây dựng chỉ dẫn tạo Structured JSON
@@ -338,6 +355,7 @@ export async function processAudioChunk(
 
     while (attempt <= backoffDelays.length && !success) {
       try {
+        signal?.throwIfAborted();
         const keyProfile = keyCandidates[keyIndex];
         if (!keyProfile) throw new Error('Không còn Gemini API Key khả dụng.');
         const response = await fetch(endpoint, {
@@ -346,7 +364,8 @@ export async function processAudioChunk(
             'Content-Type': 'application/json',
             'x-goog-api-key': keyProfile.key
           },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(payload),
+          signal
         });
 
         if (response.status === 429) {
@@ -366,7 +385,7 @@ export async function processAudioChunk(
                 'Gemini đang giới hạn lượt dùng (429). Đang chờ ' + waitSec + 's và thử lại đoạn ' + chunk.index + '/' + chunk.total + ' (lần ' + attempt + '/' + backoffDelays.length + ')...'
               );
             }
-            await sleep(waitMs);
+            await sleep(waitMs, signal);
             continue;
           } else {
             throw new Error('Gemini API đã đạt giới hạn quota (429) sau ' + backoffDelays.length + ' lần thử lại.');
@@ -400,6 +419,7 @@ export async function processAudioChunk(
         successfulModel = currentModel;
         break;
       } catch (err: any) {
+        if (err?.name === 'AbortError' || signal?.aborted) throw err;
         lastError = err.message || 'Lỗi kết nối';
         // Nếu không phải 429 hoặc đã hết số lần retry, thử model tiếp theo trong chuỗi fallback
         break;

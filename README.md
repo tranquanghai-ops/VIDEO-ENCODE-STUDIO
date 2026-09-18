@@ -38,7 +38,9 @@ Không nên nhấp trực tiếp vào `dist/index.html` bằng đường dẫn `
 - Điều chỉnh bitrate, kích thước, tỉ lệ khung hình và cắt theo phút/giây bằng thanh kéo hai đầu.
 - Chọn nhiều đoạn trong một video; tải từng đoạn riêng hoặc ghép các đoạn theo thứ tự thành một video hoàn chỉnh.
 - Timeline chung hiển thị các đoạn bằng màu riêng; có thể kéo cả đoạn mà vẫn giữ nguyên độ dài.
+- Chế độ “Chỉ cắt” dùng stream copy để giữ nguyên codec/chất lượng và khóa các thiết lập mã hóa; điểm cắt có thể được căn về keyframe gần nhất.
 - Lưu nhiều Gemini API Key có tên riêng và tự chuyển sang key dự phòng khi key hiện tại hết hạn mức hoặc không hợp lệ.
+- Tạo phụ đề AI có nút dừng khẩn cấp và nhật ký thời gian thực cho từng công đoạn.
 - Mã hóa từng video hoặc toàn bộ hàng đợi; có thể dừng tiến trình.
 
 ## Lưu ý
