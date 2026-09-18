@@ -15,6 +15,21 @@ type AudioChannels = "source" | "1" | "2";
 type AudioSampleRate = "source" | "32000" | "44100" | "48000";
 type H264Level = "auto" | "2.1" | "2.2" | "3.0" | "3.1" | "4.0" | "4.1";
 
+type TrimSegment = {
+  id: string;
+  start: number;
+  end: number;
+  enabled: boolean;
+};
+
+type SegmentOutput = {
+  id: string;
+  url: string;
+  name: string;
+  duration: number;
+  size: number;
+};
+
 type Settings = {
   format: Format;
   videoCodec: VideoCodec;
@@ -28,8 +43,6 @@ type Settings = {
   customWidth: number;
   customHeight: number;
   aspect: string;
-  trimStart: number;
-  trimEnd: number;
 };
 
 type SourceInfo = {
@@ -69,6 +82,8 @@ type VideoItem = {
   status: Status;
   progress: number;
   settings: Settings;
+  segments: TrimSegment[];
+  segmentOutputs?: SegmentOutput[];
   outputUrl?: string;
   outputName?: string;
   outputInfo?: SourceInfo;
@@ -83,12 +98,21 @@ type VideoItem = {
 const defaults: Settings = {
   format: "mp4", videoCodec: "libx264", videoBitrate: "auto", h264Level: "auto", audioCodec: "aac", audioBitrate: "128k",
   audioChannels: "source", audioSampleRate: "source",
-  resolution: "source", customWidth: 1920, customHeight: 1080, aspect: "source", trimStart: 0, trimEnd: 0,
+  resolution: "source", customWidth: 1920, customHeight: 1080, aspect: "source",
 };
 
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.4.0";
 const accepted = ".mp4,.mov,.avi,.wmv,.webm,.mkv,.m4v,.mpeg,.mpg";
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+const makeSegment = (start: number, end: number): TrimSegment => ({ id: makeId(), start, end, enabled: true });
+const roundTime = (value: number) => Math.round(value * 10) / 10;
+const timeParts = (value: number) => {
+  const normalized = roundTime(Math.max(0, Number.isFinite(value) ? value : 0));
+  let minutes = Math.floor(normalized / 60);
+  let seconds = roundTime(normalized - minutes * 60);
+  if (seconds >= 60) { minutes += 1; seconds = 0; }
+  return { minutes, seconds };
+};
 const formatBytes = (n: number) => n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : `${(n / 1e6).toFixed(n < 1e6 ? 2 : 1)} MB`;
 const formatBitrate = (n?: number) => !n ? "—" : n >= 1e6 ? `${(n / 1e6).toFixed(1)} Mbps` : `${Math.round(n / 1000)} kbps`;
 const formatTime = (s: number) => {
@@ -96,6 +120,11 @@ const formatTime = (s: number) => {
   const h = Math.floor(value / 3600), m = Math.floor((value % 3600) / 60), sec = Math.floor(value % 60);
   return h ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
 };
+
+function TimeInput({ label, value, onChange }: { label: string; value: number; onChange: (part: "minutes" | "seconds", value: number) => void }) {
+  const parts = timeParts(value);
+  return <div className="time-input"><span>{label}</span><label><input aria-label={`${label} phút`} type="number" min="0" step="1" value={parts.minutes} onChange={(event) => onChange("minutes", Number(event.target.value))} /><small>phút</small></label><b>:</b><label><input aria-label={`${label} giây`} type="number" min="0" max="59.9" step="0.1" value={parts.seconds} onChange={(event) => onChange("seconds", Number(event.target.value))} /><small>giây</small></label></div>;
+}
 const videoSummary = (info: SourceInfo | undefined, duration: number, size: number) => {
   const codec = info?.videoCodec ? info.videoCodec.toUpperCase() : "?";
   const profile = info?.videoProfile ? ` ${info.videoProfile}` : "";
@@ -380,7 +409,10 @@ export default function App() {
       const thumbnails = browserThumbs.length ? browserThumbs : await makeFfmpegThumbnails(ffmpeg, inputName, safeId, duration || 1);
       setVideos((all) => all.map((v) => v.id === item.id ? {
         ...v, duration, width: width || v.width, height: height || v.height,
-        settings: { ...v.settings, trimEnd: duration || v.settings.trimEnd }, sourceInfo, thumbnails, analysisStatus: "done",
+        segments: v.segments.length === 1 && v.segments[0].start === 0 && (v.segments[0].end === 0 || Math.abs(v.segments[0].end - v.duration) < 0.1)
+          ? [{ ...v.segments[0], end: duration || v.segments[0].end }]
+          : v.segments,
+        sourceInfo, thumbnails, analysisStatus: "done",
       } : v));
     } catch {
       setVideos((all) => all.map((v) => v.id === item.id ? { ...v, analysisStatus: "error" } : v));
@@ -394,7 +426,7 @@ export default function App() {
     if (!list.length) { setNotice("Không tìm thấy tệp video phù hợp."); return; }
     const prepared = await Promise.all(list.map(async (file): Promise<VideoItem> => {
       const meta = await readBrowserMetadata(file);
-      return { id: makeId(), file, ...meta, checked: true, analysisStatus: "pending", thumbnails: [], status: "ready", progress: 0, settings: { ...templateSettingsRef.current, trimStart: 0, trimEnd: meta.duration || 0 } };
+      return { id: makeId(), file, ...meta, checked: true, analysisStatus: "pending", thumbnails: [], status: "ready", progress: 0, settings: { ...templateSettingsRef.current }, segments: [makeSegment(0, meta.duration || 0)] };
     }));
     setVideos((old) => [...old, ...prepared]); setSelectedId((old) => old ?? prepared[0].id);
     setNotice(`Đã thêm ${prepared.length} video. Đang đọc codec và tạo thumbnail…`);
@@ -415,10 +447,46 @@ export default function App() {
   };
   const toggleChecked = (id: string) => setVideos((items) => items.map((item) => item.id === id ? { ...item, checked: !item.checked } : item));
   const toggleAll = () => setVideos((items) => items.map((item) => ({ ...item, checked: !allChecked })));
+  const updateSegment = (segmentId: string, patch: Partial<TrimSegment>) => {
+    if (!selected) return;
+    setVideos((items) => items.map((item) => {
+      if (item.id !== selected.id) return item;
+      const segments = item.segments.map((segment) => {
+        if (segment.id !== segmentId) return segment;
+        const next = { ...segment, ...patch };
+        const duration = Math.max(0.1, item.duration || next.end || 0.1);
+        const requestedStart = Number.isFinite(next.start) ? next.start : segment.start;
+        const requestedEnd = Number.isFinite(next.end) ? next.end : segment.end;
+        next.start = roundTime(Math.min(Math.max(0, requestedStart), duration - 0.1));
+        next.end = roundTime(Math.min(duration, Math.max(next.start + 0.1, requestedEnd)));
+        return next;
+      });
+      return { ...item, segments };
+    }));
+  };
+  const updateSegmentTimePart = (segment: TrimSegment, edge: "start" | "end", part: "minutes" | "seconds", value: number) => {
+    const current = timeParts(segment[edge]);
+    const safeValue = Number.isFinite(value) ? value : 0;
+    const minutes = part === "minutes" ? Math.floor(Math.max(0, safeValue)) : current.minutes;
+    const seconds = part === "seconds" ? Math.min(59.9, Math.max(0, safeValue)) : current.seconds;
+    updateSegment(segment.id, { [edge]: minutes * 60 + seconds });
+  };
+  const addSegment = () => {
+    if (!selected) return;
+    const duration = selected.duration || 0;
+    const lastEnd = selected.segments.at(-1)?.end || 0;
+    const start = lastEnd < duration - 0.1 ? lastEnd : 0;
+    const end = Math.min(duration, start + Math.min(30, duration || 30));
+    setVideos((items) => items.map((item) => item.id === selected.id ? { ...item, segments: [...item.segments, makeSegment(start, Math.max(start + 0.1, end))] } : item));
+  };
+  const removeSegment = (segmentId: string) => {
+    if (!selected || selected.segments.length === 1) return;
+    setVideos((items) => items.map((item) => item.id === selected.id ? { ...item, segments: item.segments.filter((segment) => segment.id !== segmentId) } : item));
+  };
   const applyToAll = () => {
     if (!selected) return;
     templateSettingsRef.current = { ...selected.settings };
-    setVideos((items) => items.map((item) => ({ ...item, settings: { ...selected.settings, trimStart: 0, trimEnd: item.duration || 0 } })));
+    setVideos((items) => items.map((item) => ({ ...item, settings: { ...selected.settings } })));
     setNotice(`Đã áp dụng thiết lập cho tất cả ${videos.length} video. Video thêm sau cũng dùng mẫu này.`);
   };
 
@@ -430,6 +498,7 @@ export default function App() {
     videos.forEach((item) => {
       URL.revokeObjectURL(item.url);
       if (item.outputUrl) URL.revokeObjectURL(item.outputUrl);
+      item.segmentOutputs?.forEach((output) => URL.revokeObjectURL(output.url));
       item.thumbnails.forEach((thumb) => thumb.url.startsWith("blob:") && URL.revokeObjectURL(thumb.url));
     });
     setVideos([]); setSelectedId(null); setIsBatchRunning(false);
@@ -440,15 +509,15 @@ export default function App() {
     if (activeIdRef.current === id) stopCurrentVideo(id);
     setVideos((items) => {
       const target = items.find((item) => item.id === id);
-      if (target) { URL.revokeObjectURL(target.url); if (target.outputUrl) URL.revokeObjectURL(target.outputUrl); target.thumbnails.forEach((thumb) => thumb.url.startsWith("blob:") && URL.revokeObjectURL(thumb.url)); }
+      if (target) { URL.revokeObjectURL(target.url); if (target.outputUrl) URL.revokeObjectURL(target.outputUrl); target.segmentOutputs?.forEach((output) => URL.revokeObjectURL(output.url)); target.thumbnails.forEach((thumb) => thumb.url.startsWith("blob:") && URL.revokeObjectURL(thumb.url)); }
       const next = items.filter((item) => item.id !== id); if (selectedId === id) setSelectedId(next[0]?.id ?? null); return next;
     });
   };
 
-  const buildArgs = (item: VideoItem, inputName: string, outputName: string) => {
+  const buildArgs = (item: VideoItem, segment: TrimSegment, inputName: string, outputName: string) => {
     const s = item.settings, args: string[] = [];
-    if (s.trimStart > 0) args.push("-ss", String(s.trimStart)); args.push("-i", inputName);
-    if (s.trimEnd > s.trimStart && s.trimEnd < item.duration - 0.05) args.push("-t", String(s.trimEnd - s.trimStart));
+    if (segment.start > 0) args.push("-ss", String(segment.start)); args.push("-i", inputName);
+    if (segment.end > segment.start && segment.end < item.duration - 0.05) args.push("-t", String(segment.end - segment.start));
     args.push("-c:v", s.videoCodec);
     if (s.videoCodec === "libx264") {
       args.push("-preset", "veryfast", "-crf", s.videoBitrate === "auto" ? "23" : "21", "-pix_fmt", "yuv420p");
@@ -476,7 +545,7 @@ export default function App() {
     if (s.format === "mp4" || s.format === "mov") args.push("-movflags", "+faststart"); args.push("-y", outputName); return args;
   };
 
-  const encodeH264WithBrowserCodecs = async (item: VideoItem) => {
+  const encodeH264WithBrowserCodecs = async (item: VideoItem, segment: TrimSegment, segmentIndex: number, segmentCount: number) => {
     const {
       ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, Quality,
     } = await import("mediabunny");
@@ -525,10 +594,10 @@ export default function App() {
       numberOfChannels: s.audioChannels === "source" ? undefined : Number(s.audioChannels),
       sampleRate: s.audioSampleRate === "source" ? undefined : Number(s.audioSampleRate),
     };
-    const trimChanged = s.trimStart > 0 || (s.trimEnd > s.trimStart && s.trimEnd < item.duration - 0.05);
+    const trimChanged = segment.start > 0 || (segment.end > segment.start && segment.end < item.duration - 0.05);
     const conversion = await Conversion.init({
       input, output, tracks: "primary", video: videoOptions, audio,
-      trim: trimChanged ? { start: s.trimStart, end: s.trimEnd } : undefined,
+      trim: trimChanged ? { start: segment.start, end: segment.end } : undefined,
       tags: {}, showWarnings: false,
     });
     activeMediaConversionRef.current = conversion;
@@ -537,67 +606,80 @@ export default function App() {
       const reasons = conversion.discardedTracks.map((entry) => entry.reason).join(", ");
       throw new Error(`Trình duyệt không thể thực hiện đầy đủ chuyển đổi sang H.264/AAC (${reasons || "không rõ nguyên nhân"}).`);
     }
-    conversion.onProgress = (progress) => setVideos((all) => all.map((v) => v.id === item.id ? { ...v, progress: Math.min(99, Math.max(0, Math.round(progress * 100))) } : v));
+    conversion.onProgress = (progress) => setVideos((all) => all.map((v) => v.id === item.id ? { ...v, progress: Math.min(99, Math.max(0, Math.round((segmentIndex + progress) / segmentCount * 92))) } : v));
     await conversion.execute();
     if (cancelCurrentRef.current) throw new Error("Đã dừng theo yêu cầu.");
     if (!target.buffer) throw new Error("Bộ mã hóa trình duyệt không tạo được dữ liệu đầu ra.");
     return new Uint8Array(target.buffer);
   };
 
-  const encodeOne = async (item: VideoItem) => {
+  const encodeOne = async (item: VideoItem, mode: "combined" | "individual" = "combined") => {
+    const segments = item.segments.filter((segment) => segment.enabled && segment.end - segment.start >= 0.1);
+    if (!segments.length) { setNotice("Hãy bật ít nhất một đoạn cắt hợp lệ trước khi xuất video."); return false; }
     cancelCurrentRef.current = false; activeIdRef.current = item.id;
     if (item.outputUrl) URL.revokeObjectURL(item.outputUrl);
-    setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "encoding", progress: 0, error: undefined, encodeError: undefined, outputUrl: undefined, outputName: undefined, outputInfo: undefined, outputDuration: undefined, outputWidth: undefined, outputHeight: undefined, outputSize: undefined } : v));
+    item.segmentOutputs?.forEach((output) => URL.revokeObjectURL(output.url));
+    setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "encoding", progress: 0, error: undefined, encodeError: undefined, outputUrl: undefined, outputName: undefined, segmentOutputs: undefined, outputInfo: undefined, outputDuration: undefined, outputWidth: undefined, outputHeight: undefined, outputSize: undefined } : v));
     let ffmpeg: FFmpegType | null = null; let onProgress: ((data: { progress: number }) => void) | null = null;
     let onLog: ((data: { message: string }) => void) | null = null; const logs: string[] = [];
+    let progressSegmentIndex = 0;
     const safeId = item.id.replaceAll("-", ""), ext = item.file.name.split(".").pop()?.toLowerCase() || "mp4";
-    const inputName = `input-${safeId}.${ext}`, outputName = `output-${safeId}.${item.settings.format}`, browserOutputName = `browser-${safeId}.mp4`;
+    const inputName = `input-${safeId}.${ext}`, outputName = `output-${safeId}.${item.settings.format}`, concatListName = `concat-${safeId}.txt`;
+    const temporaryFiles = new Set<string>([inputName, outputName, concatListName]);
     try {
-      let bytes: Uint8Array;
+      ffmpeg = await loadEngine();
+      const { fetchFile } = await import("@ffmpeg/util");
+      onProgress = ({ progress }) => setVideos((all) => all.map((v) => v.id === item.id ? { ...v, progress: Math.min(99, Math.max(0, Math.round((progressSegmentIndex + progress) / segments.length * 92))) } : v));
+      onLog = ({ message }) => { logs.push(message); if (logs.length > 160) logs.shift(); };
+      ffmpeg.on("progress", onProgress); ffmpeg.on("log", onLog);
+      await ffmpeg.writeFile(inputName, await fetchFile(item.file));
+
       const sourceCodec = item.sourceInfo?.videoCodec.toLowerCase() || "";
       const useBrowserH264 = (sourceCodec === "av1" || sourceCodec === "h264" || sourceCodec.startsWith("avc"))
         && item.settings.format === "mp4"
         && item.settings.videoCodec === "libx264"
         && (item.settings.h264Level === "auto" || item.settings.h264Level === "3.1");
-      let browserBytes: Uint8Array | undefined;
-      if (useBrowserH264) {
-        try {
-          browserBytes = await encodeH264WithBrowserCodecs(item);
-        } catch (browserError) {
-          if (cancelCurrentRef.current) throw browserError;
-          activeMediaConversionRef.current = null;
-          const reason = browserError instanceof Error ? browserError.message : String(browserError);
-          logs.push(`WebCodecs fallback: ${reason}`);
-          setNotice("WebCodecs không hỗ trợ cấu hình này trên máy hiện tại; đang tự chuyển sang FFmpeg.");
+      const encodedSegments: Array<{ segment: TrimSegment; bytes: Uint8Array; fileName: string }> = [];
+
+      for (let index = 0; index < segments.length; index++) {
+        progressSegmentIndex = index;
+        const segment = segments[index];
+        const segmentFileName = `segment-${safeId}-${index}.${item.settings.format}`;
+        const browserFileName = `browser-${safeId}-${index}.mp4`;
+        temporaryFiles.add(segmentFileName); temporaryFiles.add(browserFileName);
+        let browserBytes: Uint8Array | undefined;
+        if (useBrowserH264) {
+          try {
+            browserBytes = await encodeH264WithBrowserCodecs(item, segment, index, segments.length);
+          } catch (browserError) {
+            if (cancelCurrentRef.current) throw browserError;
+            activeMediaConversionRef.current = null;
+            const reason = browserError instanceof Error ? browserError.message : String(browserError);
+            logs.push(`WebCodecs fallback: ${reason}`);
+            setNotice("WebCodecs không hỗ trợ cấu hình này trên máy hiện tại; đang tự chuyển sang FFmpeg.");
+          }
         }
-      }
-      if (browserBytes) {
-        bytes = browserBytes;
-        ffmpeg = await loadEngine();
-        onLog = ({ message }) => { logs.push(message); if (logs.length > 160) logs.shift(); };
-        ffmpeg.on("log", onLog);
-        await ffmpeg.writeFile(browserOutputName, new Uint8Array(bytes));
-        const audioArgs = item.settings.audioCodec === "none" ? ["-an"] : [
-          "-c:a", item.settings.audioCodec, "-b:a", item.settings.audioBitrate,
-          ...(item.settings.audioCodec === "aac" ? ["-profile:a", "aac_low"] : []),
-          ...(item.settings.audioChannels === "source" ? [] : ["-ac", item.settings.audioChannels]),
-          ...(item.settings.audioSampleRate === "source" ? [] : ["-ar", item.settings.audioSampleRate]),
-        ];
-        const audioExitCode = await ffmpeg.exec(["-i", browserOutputName, "-c:v", "copy", ...audioArgs, "-movflags", "+faststart", "-y", outputName]);
+        if (browserBytes) {
+          await ffmpeg.writeFile(browserFileName, browserBytes);
+          const audioArgs = item.settings.audioCodec === "none" ? ["-an"] : [
+            "-c:a", item.settings.audioCodec, "-b:a", item.settings.audioBitrate,
+            ...(item.settings.audioCodec === "aac" ? ["-profile:a", "aac_low"] : []),
+            ...(item.settings.audioChannels === "source" ? [] : ["-ac", item.settings.audioChannels]),
+            ...(item.settings.audioSampleRate === "source" ? [] : ["-ar", item.settings.audioSampleRate]),
+          ];
+          const exitCode = await ffmpeg.exec(["-i", browserFileName, "-c:v", "copy", ...audioArgs, "-movflags", "+faststart", "-y", segmentFileName]);
+          if (exitCode !== 0) throw new Error("Không thể tạo lại âm thanh theo bitrate đã chọn.");
+        } else {
+          const exitCode = await ffmpeg.exec(buildArgs(item, segment, inputName, segmentFileName));
+          if (exitCode !== 0) throw new Error(`Không thể mã hóa đoạn ${index + 1}.`);
+        }
         if (cancelCurrentRef.current) throw new Error("Đã dừng theo yêu cầu.");
-        if (audioExitCode !== 0) throw new Error("Không thể tạo lại âm thanh theo bitrate đã chọn.");
-        const audioFixedData = await ffmpeg.readFile(outputName);
-        bytes = typeof audioFixedData === "string" ? new TextEncoder().encode(audioFixedData) : new Uint8Array(audioFixedData);
-      } else {
-        ffmpeg = await loadEngine(); const { fetchFile } = await import("@ffmpeg/util");
-        onProgress = ({ progress }) => setVideos((all) => all.map((v) => v.id === item.id ? { ...v, progress: Math.min(99, Math.max(0, Math.round(progress * 100))) } : v));
-        onLog = ({ message }) => { logs.push(message); if (logs.length > 160) logs.shift(); };
-        ffmpeg.on("progress", onProgress); ffmpeg.on("log", onLog); await ffmpeg.writeFile(inputName, await fetchFile(item.file));
-        const exitCode = await ffmpeg.exec(buildArgs(item, inputName, outputName));
-        if (cancelCurrentRef.current) throw new Error("Đã dừng theo yêu cầu."); if (exitCode !== 0) throw new Error("Bộ mã hóa không thể xử lý thiết lập này.");
-        const data = await ffmpeg.readFile(outputName); bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
+        const data = await ffmpeg.readFile(segmentFileName);
+        const bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
+        encodedSegments.push({ segment, bytes, fileName: segmentFileName });
       }
-      const outputBlob = new Blob([new Uint8Array(bytes)], { type: `video/${item.settings.format}` });
+
+      const base = item.file.name.replace(/\.[^.]+$/, "");
       let outputInfo: SourceInfo = {
         format: item.settings.format.toUpperCase(),
         videoCodec: item.settings.videoCodec === "libx264" ? "h264" : item.settings.videoCodec === "libvpx-vp9" ? "vp9" : "mpeg4",
@@ -608,14 +690,40 @@ export default function App() {
         audioChannels: item.settings.audioChannels === "source" ? item.sourceInfo?.audioChannels : Number(item.settings.audioChannels),
         audioSampleRate: item.settings.audioSampleRate === "source" ? item.sourceInfo?.audioSampleRate : Number(item.settings.audioSampleRate),
       };
-      let outputDuration = item.settings.trimEnd > item.settings.trimStart ? item.settings.trimEnd - item.settings.trimStart : item.duration;
+      let outputDuration = segments.reduce((sum, segment) => sum + segment.end - segment.start, 0);
       let outputWidth = item.settings.resolution === "custom" ? item.settings.customWidth : item.width;
       let outputHeight = item.settings.resolution === "custom" ? item.settings.customHeight : item.height;
+
+      if (mode === "individual") {
+        const segmentOutputs = encodedSegments.map(({ segment, bytes }, index) => ({
+          id: segment.id,
+          url: URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: `video/${item.settings.format}` })),
+          name: `${base}-segment-${String(index + 1).padStart(2, "0")}.${item.settings.format}`,
+          duration: segment.end - segment.start,
+          size: bytes.byteLength,
+        }));
+        setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "done", progress: 100, segmentOutputs, outputInfo, outputDuration, outputWidth, outputHeight, outputSize: segmentOutputs.reduce((sum, output) => sum + output.size, 0) } : v));
+        setNotice(`Đã xuất riêng ${segmentOutputs.length} đoạn video.`);
+        return true;
+      }
+
+      let bytes: Uint8Array;
+      if (encodedSegments.length === 1) {
+        bytes = encodedSegments[0].bytes;
+        await ffmpeg.writeFile(outputName, bytes);
+      } else {
+        const concatList = encodedSegments.map(({ fileName }) => `file '${fileName}'`).join("\n");
+        await ffmpeg.writeFile(concatListName, new TextEncoder().encode(concatList));
+        const concatArgs = ["-f", "concat", "-safe", "0", "-i", concatListName, "-c", "copy"];
+        if (item.settings.format === "mp4" || item.settings.format === "mov") concatArgs.push("-movflags", "+faststart");
+        concatArgs.push("-y", outputName);
+        const concatExitCode = await ffmpeg.exec(concatArgs);
+        if (concatExitCode !== 0) throw new Error("Không thể ghép các đoạn video đã chọn.");
+        const data = await ffmpeg.readFile(outputName);
+        bytes = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
+      }
+      const outputBlob = new Blob([new Uint8Array(bytes)], { type: `video/${item.settings.format}` });
       try {
-        if (!ffmpeg) {
-          ffmpeg = await loadEngine();
-          await ffmpeg.writeFile(outputName, new Uint8Array(bytes));
-        }
         const probeLogs: string[] = [];
         const probeLog = ({ message }: { message: string }) => probeLogs.push(message);
         ffmpeg.on("log", probeLog);
@@ -624,20 +732,23 @@ export default function App() {
         const parsed = parseFfmpegInfo(probeLogs, item, item.settings.format);
         outputInfo = parsed.sourceInfo;
         outputInfo.videoLevel = await readH264Level(outputBlob);
-        outputDuration = parsed.duration;
-        outputWidth = parsed.width;
-        outputHeight = parsed.height;
+        outputDuration = parsed.duration || outputDuration;
+        outputWidth = parsed.width || outputWidth;
+        outputHeight = parsed.height || outputHeight;
       } catch { /* Giữ thông số suy ra nếu bước đọc kết quả không khả dụng. */ }
       const url = URL.createObjectURL(outputBlob);
-      const base = item.file.name.replace(/\.[^.]+$/, "");
-      setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "done", progress: 100, outputUrl: url, outputName: `${base}-encoded.${item.settings.format}`, outputInfo, outputDuration, outputWidth, outputHeight, outputSize: bytes.byteLength } : v));
+      setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "done", progress: 100, outputUrl: url, outputName: `${base}-${segments.length > 1 ? "selected-segments" : "encoded"}.${item.settings.format}`, outputInfo, outputDuration, outputWidth, outputHeight, outputSize: bytes.byteLength } : v));
+      setNotice(segments.length > 1 ? `Đã ghép ${segments.length} đoạn thành một video hoàn chỉnh.` : "Đã mã hóa video thành công.");
       return true;
     } catch (error) {
       const encodeError = makeEncodeError(error, logs, item);
       setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: cancelCurrentRef.current ? "stopped" : "error", error: encodeError.message, encodeError } : v));
       return false;
     } finally {
-      if (ffmpeg && ffmpegRef.current) { if (onProgress) ffmpeg.off("progress", onProgress); if (onLog) ffmpeg.off("log", onLog); await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(outputName), ffmpeg.deleteFile(browserOutputName)]); }
+      if (ffmpeg && ffmpegRef.current) {
+        if (onProgress) ffmpeg.off("progress", onProgress); if (onLog) ffmpeg.off("log", onLog);
+        await Promise.allSettled([...temporaryFiles].map((fileName) => ffmpeg!.deleteFile(fileName)));
+      }
       activeMediaConversionRef.current = null; activeIdRef.current = null;
     }
   };
@@ -727,10 +838,11 @@ export default function App() {
               {!videos.length ? <button className={`dropzone ${dragging ? "is-dragging" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}><span className="upload-icon">↥</span><strong>Thả video vào đây</strong><span>hoặc nhấn để chọn nhiều tệp</span><small>MP4, MOV, AVI, WMV, WebM, MKV…</small></button> : <>
                 <label className="select-all"><input type="checkbox" checked={allChecked} onChange={toggleAll} /> <span>Chọn tất cả</span><b>{checkedCount} đã chọn</b></label>
                 <button className={`add-more-dropzone ${dragging ? "is-dragging" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={drop}><span>↥</span><strong>Kéo thả thêm video vào đây</strong><small>hoặc nhấn để chọn tệp</small></button>
-                <div className="queue-list">{videos.map((item, index) => <div key={item.id} className={`video-card ${selected?.id === item.id ? "active" : ""} ${item.outputUrl ? "has-output" : ""}`}>
+                <div className="queue-list">{videos.map((item, index) => <div key={item.id} className={`video-card ${selected?.id === item.id ? "active" : ""} ${item.outputUrl || item.segmentOutputs?.length ? "has-output" : ""}`}>
                   <label className="file-check" title="Chọn để xử lý hàng loạt"><input type="checkbox" checked={item.checked} onChange={() => toggleChecked(item.id)} /></label>
                   <button className="video-select" onClick={() => setSelectedId(item.id)}><span className="thumb">{item.thumbnails[0] ? <img src={item.thumbnails[0].url} alt="" /> : <video src={item.url} muted preload="metadata" />}<span>{formatTime(item.duration)}</span></span><span className="video-info"><strong title={item.file.name}>{item.file.name}</strong>{item.sourceInfo ? <small className="queue-spec source"><b>Gốc</b>{videoSummary(item.sourceInfo, item.duration, item.file.size)}</small> : <small>{item.analysisStatus === "error" ? "Không đọc được thông số video" : "Đang đọc codec, bitrate, thời lượng…"}</small>}{item.outputInfo && <small className="queue-spec output"><b>Nén</b>{videoSummary(item.outputInfo, item.outputDuration || item.duration, item.outputSize || 0)}</small>}<span className={`state state-${item.status}`} title={item.encodeError?.message}>{item.status === "ready" ? "Sẵn sàng" : item.status === "queued" ? "Đang chờ" : item.status === "encoding" ? `Đang mã hóa ${item.progress}%` : item.status === "done" ? "Hoàn tất" : item.status === "stopped" ? "Đã dừng" : item.encodeError?.title || "Có lỗi"}</span>{item.status === "encoding" && <i className="progress"><i style={{ width: `${item.progress}%` }} /></i>}</span><span className="index">{String(index + 1).padStart(2, "0")}</span></button>
                   {item.outputUrl && <a className="queue-download" href={item.outputUrl} download={item.outputName} title={`Tải xuống ${item.outputName}`} onClick={(event) => event.stopPropagation()}>↓ Tải</a>}
+                  {!item.outputUrl && item.segmentOutputs?.length === 1 && <a className="queue-download" href={item.segmentOutputs[0].url} download={item.segmentOutputs[0].name} title={`Tải xuống ${item.segmentOutputs[0].name}`} onClick={(event) => event.stopPropagation()}>↓ Tải</a>}
                   {item.status === "encoding" && <button className="row-stop" onClick={() => stopCurrentVideo(item.id)} title="Dừng ngay video này">■</button>}
                 </div>)}</div>
               </>}
@@ -753,15 +865,28 @@ export default function App() {
                 <fieldset><legend>Hình ảnh</legend><label>Định dạng<select value={selected.settings.format} onChange={(e) => updateSettings({ format: e.target.value as Format })}><option value="mp4">MP4</option><option value="mov">MOV</option><option value="webm">WebM</option><option value="mkv">MKV</option></select></label><label>Video codec<select value={selected.settings.videoCodec} onChange={(e) => updateSettings({ videoCodec: e.target.value as VideoCodec })}><option value="libx264">H.264 — tương thích cao</option><option value="libvpx-vp9">VP9 — dung lượng nhỏ</option><option value="mpeg4">MPEG-4</option></select></label><label>H.264 Level<select disabled={selected.settings.videoCodec !== "libx264"} value={selected.settings.h264Level} onChange={(e) => updateSettings({ h264Level: e.target.value as H264Level })}><option value="auto">Tự động</option><option value="2.1">Level 2.1</option><option value="2.2">Level 2.2 — đầu xe đời cũ</option><option value="3.0">Level 3.0</option><option value="3.1">Level 3.1</option><option value="4.0">Level 4.0</option><option value="4.1">Level 4.1</option></select></label><label>Video bitrate<select value={selected.settings.videoBitrate} onChange={(e) => updateSettings({ videoBitrate: e.target.value })}><option value="auto">Tự động (khuyên dùng)</option><option value="100k">100 kbps — cực nhỏ</option><option value="150k">150 kbps</option><option value="200k">200 kbps</option><option value="250k">250 kbps</option><option value="300k">300 kbps — rất nhỏ</option><option value="500k">500 kbps</option><option value="800k">800 kbps — phù hợp 360p/480p</option><option value="1M">1 Mbps</option><option value="1500k">1,5 Mbps</option><option value="2M">2 Mbps</option><option value="5M">5 Mbps</option><option value="10M">10 Mbps</option><option value="20M">20 Mbps</option></select></label><small className="setting-hint">AV1 thường cần bitrate thấp hơn H.264 để đạt chất lượng tương đương.</small></fieldset>
                 <fieldset><legend>Âm thanh</legend><label>Audio codec<select value={selected.settings.audioCodec} onChange={(e) => updateSettings({ audioCodec: e.target.value as AudioCodec })}><option value="aac">AAC</option><option value="libmp3lame">MP3</option><option value="libopus">Opus</option><option value="libvorbis">Vorbis</option><option value="none">Không có âm thanh</option></select></label><label>Audio bitrate<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioBitrate} onChange={(e) => updateSettings({ audioBitrate: e.target.value })}><option value="96k">96 kbps</option><option value="128k">128 kbps</option><option value="192k">192 kbps</option><option value="256k">256 kbps</option><option value="320k">320 kbps</option></select></label><label>Số kênh<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioChannels} onChange={(e) => updateSettings({ audioChannels: e.target.value as AudioChannels })}><option value="source">Giữ nguyên{selected.sourceInfo?.audioChannels ? ` · ${selected.sourceInfo.audioChannels} kênh` : ""}</option><option value="1">Mono · 1 kênh</option><option value="2">Stereo · 2 kênh</option></select></label><label>Tần số âm thanh<select disabled={selected.settings.audioCodec === "none"} value={selected.settings.audioSampleRate} onChange={(e) => updateSettings({ audioSampleRate: e.target.value as AudioSampleRate })}><option value="source">Giữ nguyên{selected.sourceInfo?.audioSampleRate ? ` · ${selected.sourceInfo.audioSampleRate} Hz` : ""}</option><option value="32000">32.000 Hz</option><option value="44100">44.100 Hz</option><option value="48000">48.000 Hz</option></select></label></fieldset>
                 <fieldset><legend>Khung hình</legend><label>Kích thước<select value={selected.settings.resolution} onChange={(e) => updateSettings({ resolution: e.target.value })}><option value="source">Giữ nguyên</option><option value="2160">4K · 3840×2160</option><option value="1080">Full HD · 1920×1080</option><option value="720">HD · 1280×720</option><option value="480">SD · 854×480</option><option value="custom">Tùy chỉnh</option></select></label><label>Tỉ lệ<select value={selected.settings.aspect} onChange={(e) => updateSettings({ aspect: e.target.value })}><option value="source">Giữ nguyên</option><option value="16:9">16:9 ngang</option><option value="9:16">9:16 dọc</option><option value="4:3">4:3</option><option value="1:1">1:1 vuông</option></select></label>{selected.settings.resolution === "custom" && <div className="dimension-row"><input aria-label="Chiều rộng" type="number" min="16" value={selected.settings.customWidth} onChange={(e) => updateSettings({ customWidth: Number(e.target.value) })}/><span>×</span><input aria-label="Chiều cao" type="number" min="16" value={selected.settings.customHeight} onChange={(e) => updateSettings({ customHeight: Number(e.target.value) })}/></div>}</fieldset>
-                <fieldset><legend>Cắt video</legend><div className="trim-row"><label>Bắt đầu<input type="number" min="0" max={selected.settings.trimEnd} step="0.1" value={selected.settings.trimStart} onChange={(e) => updateSettings({ trimStart: Math.max(0, Number(e.target.value)) })}/><small>giây</small></label><label>Kết thúc<input type="number" min={selected.settings.trimStart} max={selected.duration} step="0.1" value={Number(selected.settings.trimEnd.toFixed(1))} onChange={(e) => updateSettings({ trimEnd: Math.min(selected.duration, Number(e.target.value)) })}/><small>giây</small></label></div><div className="trim-track"><i style={{ left: `${selected.duration ? selected.settings.trimStart / selected.duration * 100 : 0}%`, right: `${selected.duration ? 100 - selected.settings.trimEnd / selected.duration * 100 : 0}%` }} /></div><small>Thời lượng sau cắt: {formatTime(selected.settings.trimEnd - selected.settings.trimStart)}</small></fieldset>
+                <fieldset className="trim-editor"><legend>Cắt nhiều đoạn</legend>
+                  <div className="trim-editor-head"><small>Bật các đoạn muốn giữ; các đoạn sẽ được ghép theo thứ tự bên dưới.</small><button type="button" disabled={!selected.duration} onClick={addSegment}>+ Thêm đoạn</button></div>
+                  <div className="segment-list">{selected.segments.map((segment, index) => {
+                    const startPercent = selected.duration ? segment.start / selected.duration * 100 : 0;
+                    const endPercent = selected.duration ? segment.end / selected.duration * 100 : 100;
+                    return <section className={`segment-card ${segment.enabled ? "" : "disabled"}`} key={segment.id}>
+                      <div className="segment-title"><label><input type="checkbox" checked={segment.enabled} onChange={(event) => updateSegment(segment.id, { enabled: event.target.checked })} /><strong>Đoạn {index + 1}</strong></label><span>{formatTime(segment.start)} → {formatTime(segment.end)} · {formatTime(segment.end - segment.start)}</span><button type="button" disabled={selected.segments.length === 1} onClick={() => removeSegment(segment.id)}>Xóa</button></div>
+                      <div className="trim-slider" style={{ "--trim-start": `${startPercent}%`, "--trim-end": `${endPercent}%` } as React.CSSProperties}><i /><input aria-label={`Điểm bắt đầu đoạn ${index + 1}`} type="range" min="0" max={selected.duration || 0.1} step="0.1" value={segment.start} onChange={(event) => updateSegment(segment.id, { start: Number(event.target.value) })} /><input aria-label={`Điểm kết thúc đoạn ${index + 1}`} type="range" min="0" max={selected.duration || 0.1} step="0.1" value={segment.end} onChange={(event) => updateSegment(segment.id, { end: Number(event.target.value) })} /></div>
+                      <div className="trim-time-row"><TimeInput label="Bắt đầu" value={segment.start} onChange={(part, value) => updateSegmentTimePart(segment, "start", part, value)} /><TimeInput label="Kết thúc" value={segment.end} onChange={(part, value) => updateSegmentTimePart(segment, "end", part, value)} /></div>
+                    </section>;
+                  })}</div>
+                  <div className="trim-summary"><span>Video gốc: {formatTime(selected.duration)}</span><strong>Tổng thời lượng đã chọn: {formatTime(selected.segments.filter((segment) => segment.enabled).reduce((sum, segment) => sum + segment.end - segment.start, 0))}</strong></div>
+                </fieldset>
               </div>
               {selected.outputUrl && <a className="download-card" href={selected.outputUrl} download={selected.outputName}><span>✓</span><div><strong>Video đã sẵn sàng</strong><small>{selected.outputName}</small></div><b>Tải xuống</b></a>}
+              {selected.segmentOutputs?.length ? <section className="segment-downloads"><div><strong>{selected.segmentOutputs.length} đoạn đã sẵn sàng</strong><small>Tải riêng từng đoạn video</small></div>{selected.segmentOutputs.map((output, index) => <a key={output.id} href={output.url} download={output.name}><span>Đoạn {index + 1}</span><small>{formatTime(output.duration)} · {formatBytes(output.size)}</small><b>↓ Tải xuống</b></a>)}</section> : null}
               {selected.encodeError ? <section className="error-note detailed"><div className="error-heading"><span>!</span><div><small>MÃ LỖI: {selected.encodeError.code}</small><strong>{selected.encodeError.title}</strong></div></div><p>{selected.encodeError.message}</p><div className="error-context"><span>Tệp gốc</span><b>{selected.sourceInfo?.videoCodec?.toUpperCase() || "?"} · {selected.width || "?"} × {selected.height || "?"}</b><span>Đầu ra đã chọn</span><b>{selected.settings.format.toUpperCase()} · {selected.settings.videoCodec === "libx264" ? "H.264" : selected.settings.videoCodec === "libvpx-vp9" ? "VP9" : "MPEG-4"}</b></div><ul>{selected.encodeError.suggestions.map((suggestion) => <li key={suggestion}>{suggestion}</li>)}</ul>{selected.encodeError.technical && <details><summary>Xem chi tiết kỹ thuật</summary><pre>{selected.encodeError.technical}</pre></details>}</section> : selected.error && <div className="error-note">{selected.error}</div>}
             </>}
             </section>
           </section>
 
-          <footer className="actionbar"><div className="footer-status"><span className={engineReady ? "engine ready" : "engine"}>{analyzingCount ? `Đang đọc thông tin gốc: còn ${analyzingCount} video…` : engineReady ? "Bộ mã hóa đã sẵn sàng" : engineLoading ? "Đang khởi động bộ mã hóa…" : notice}</span><small>Phát triển bởi ThS. Trần Quang Hải &amp; ChatGPT (OpenAI) · Phiên bản {APP_VERSION}</small></div><div className="actions"><button className="secondary" disabled={!selected || !videos.length || isBatchRunning} onClick={applyToAll}>Áp dụng cho tất cả tệp</button>{selected?.status === "encoding" && !isBatchRunning && <button className="danger" onClick={() => stopCurrentVideo(selected.id)}>Dừng video này</button>}{isBatchRunning ? <button className="danger" onClick={stopBatch}>Dừng hàng loạt</button> : <><button className="secondary compact" disabled={!selected || analyzingCount > 0} onClick={() => selected && void encodeOne(selected)}>Mã hóa video này</button><button className="primary" disabled={!checkedCount || engineLoading || analyzingCount > 0} onClick={() => void encodeChecked()}>Mã hóa {checkedCount} video <span>→</span></button></>}</div></footer>
+          <footer className="actionbar"><div className="footer-status"><span className={engineReady ? "engine ready" : "engine"}>{analyzingCount ? `Đang đọc thông tin gốc: còn ${analyzingCount} video…` : engineReady ? "Bộ mã hóa đã sẵn sàng" : engineLoading ? "Đang khởi động bộ mã hóa…" : notice}</span><small>Phát triển bởi ThS. Trần Quang Hải &amp; ChatGPT (OpenAI) · Phiên bản {APP_VERSION}</small></div><div className="actions"><button className="secondary" disabled={!selected || !videos.length || isBatchRunning} onClick={applyToAll}>Áp dụng cho tất cả tệp</button>{selected?.status === "encoding" && !isBatchRunning && <button className="danger" onClick={() => stopCurrentVideo(selected.id)}>Dừng video này</button>}{isBatchRunning ? <button className="danger" onClick={stopBatch}>Dừng hàng loạt</button> : <><button className="secondary compact" disabled={!selected || analyzingCount > 0} onClick={() => selected && void encodeOne(selected, "individual")}>Xuất từng đoạn</button><button className="secondary compact" disabled={!selected || analyzingCount > 0} onClick={() => selected && void encodeOne(selected)}>Ghép đoạn đã chọn</button><button className="primary" disabled={!checkedCount || engineLoading || analyzingCount > 0} onClick={() => void encodeChecked()}>Mã hóa {checkedCount} video <span>→</span></button></>}</div></footer>
         </>
       )}
 
