@@ -35,7 +35,8 @@ Không nên nhấp trực tiếp vào `dist/index.html` bằng đường dẫn `
 - Xuất MP4, MOV, WebM hoặc MKV.
 - Video codec: H.264, VP9, MPEG-4.
 - Audio codec: AAC, MP3, Opus, Vorbis hoặc loại bỏ âm thanh.
-- Điều chỉnh bitrate, kích thước, tỉ lệ khung hình và thời gian cắt.
+- Điều chỉnh bitrate, kích thước, tỉ lệ khung hình và cắt theo phút/giây bằng thanh kéo hai đầu.
+- Chọn nhiều đoạn trong một video; tải từng đoạn riêng hoặc ghép các đoạn theo thứ tự thành một video hoàn chỉnh.
 - Mã hóa từng video hoặc toàn bộ hàng đợi; có thể dừng tiến trình.
 
 ## Lưu ý
