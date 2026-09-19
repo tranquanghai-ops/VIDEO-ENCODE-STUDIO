@@ -949,7 +949,7 @@ export default function App() {
         </>
       )}
 
-      {activeTab === "subtitle" && (
+      <div hidden={activeTab !== "subtitle"}>
         <BatchSubtitleStudio
           videos={videos}
           onAddFiles={addFiles}
@@ -962,7 +962,7 @@ export default function App() {
           onOpenKeyModal={() => setShowKeyModal(true)}
           onEmergencyStopEngine={resetEngine}
         />
-      )}
+      </div>
 
       <GeminiKeyModal
         isOpen={showKeyModal}

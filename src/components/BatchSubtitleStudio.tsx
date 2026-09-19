@@ -1015,6 +1015,10 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                       </button>
                     )}
 
+                    {isStopped && (
+                      <button type="button" onClick={() => handleRetrySingle(video)} disabled={isBatchRunning} style={{ background: '#0284c7', border: 'none', color: '#ffffff', padding: '0.35rem 0.75rem', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600, cursor: isBatchRunning ? 'not-allowed' : 'pointer' }}>▶ Tiếp tục</button>
+                    )}
+
                     <button
                       type="button"
                       onClick={() => onRemoveVideo(video.id)}

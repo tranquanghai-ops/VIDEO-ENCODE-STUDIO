@@ -121,6 +121,22 @@ export function setActiveStoredApiKey(id: string): StoredKeyInfo {
   return getStoredApiKey();
 }
 
+export function updateStoredApiKey(id: string, key: string, name: string, remember: boolean): GeminiKeyProfile | undefined {
+  const cleanKey = key.trim();
+  if (!cleanKey) return undefined;
+  try {
+    const profiles = getStoredApiKeys();
+    const existing = profiles.find((profile) => profile.id === id);
+    if (!existing) return undefined;
+    const profile: GeminiKeyProfile = { ...existing, key: cleanKey, name: name.trim() || existing.name, type: remember ? 'local' : 'session' };
+    const next = profiles.map((item) => item.id === id ? profile : item);
+    writeProfiles(next, 'session'); writeProfiles(next, 'local');
+    localStorage.setItem(STORAGE_KEY_ACTIVE_ID, id);
+    notifyKeyringChanged();
+    return profile;
+  } catch { return undefined; }
+}
+
 export function removeStoredApiKey(id: string): StoredKeyInfo {
   try {
     const next = getStoredApiKeys().filter((profile) => profile.id !== id);
