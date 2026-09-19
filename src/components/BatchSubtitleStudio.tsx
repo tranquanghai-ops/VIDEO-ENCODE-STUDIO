@@ -71,6 +71,9 @@ export interface VideoSubtitleState {
   errorMessage?: string;
   languageUsed?: string;
   logs?: string[];
+  burnedVideoUrl?: string;
+  burnedVideoName?: string;
+  isBurning?: boolean;
 }
 
 const formatTime = (seconds: number) => {
@@ -79,6 +82,8 @@ const formatTime = (seconds: number) => {
   const sec = Math.floor(s % 60);
   return `${m}:${String(sec).padStart(2, '0')}`;
 };
+
+const srtToVtt = (srt: string) => `WEBVTT\n\n${srt.replace(/(\d{2}:\d{2}:\d{2}),/g, '$1.')}`;
 
 export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
   videos,
@@ -101,7 +106,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
   // Per-video subtitle states mapped by video.id
   const [subStates, setSubStates] = useState<Record<string, VideoSubtitleState>>({});
   const [isBatchRunning, setIsBatchRunning] = useState<boolean>(false);
-  const [previewModal, setPreviewModal] = useState<{ filename: string; srt: string } | null>(null);
+  const [previewModal, setPreviewModal] = useState<{ filename: string; videoUrl: string; srt: string } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -145,7 +150,8 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
       const current = prev[id] || { checked: true, status: 'idle', statusText: 'Chờ xử lý', progressPercent: 0 };
       return {
         ...prev,
-        [id]: { ...current, logs: [...(current.logs || []), `[${timestamp}] ${message}`].slice(-80) }
+        // Nhật ký mới nhất luôn ở đầu để người dùng thấy ngay trạng thái hiện tại.
+        [id]: { ...current, logs: [`[${timestamp}] ${message}`, ...(current.logs || [])].slice(0, 80) }
       };
     });
   };
@@ -392,6 +398,34 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
     downloadSrtFile(st.srtContent, filename);
   };
 
+  const handleBurnSubtitles = async (video: VideoItem) => {
+    const state = subStates[video.id];
+    if (!state?.srtContent || state.isBurning) return;
+    const inputName = `subtitle-input-${video.id}.mp4`;
+    const subtitleName = `subtitle-${video.id}.srt`;
+    const outputName = `${video.file.name.replace(/\.[^/.]+$/, '')}.subtitled.mp4`;
+    const outputPath = `subtitle-output-${video.id}.mp4`;
+    updateVideoSubState(video.id, { isBurning: true });
+    appendLog(video.id, 'Đang ghép cứng phụ đề vào video MP4.');
+    try {
+      const ffmpeg = await ffmpegLoader();
+      await ffmpeg.writeFile(inputName, new Uint8Array(await video.file.arrayBuffer()));
+      await ffmpeg.writeFile(subtitleName, new TextEncoder().encode(state.srtContent));
+      await ffmpeg.exec(['-i', inputName, '-vf', `subtitles=${subtitleName}`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', outputPath]);
+      const output = await ffmpeg.readFile(outputPath);
+      const blob = new Blob([new Uint8Array(Array.from(output as Uint8Array))], { type: 'video/mp4' });
+      const previous = subStates[video.id]?.burnedVideoUrl;
+      if (previous) URL.revokeObjectURL(previous);
+      updateVideoSubState(video.id, { burnedVideoUrl: URL.createObjectURL(blob), burnedVideoName: outputName });
+      appendLog(video.id, 'Đã tạo video MP4 ghép cứng phụ đề.');
+      await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(subtitleName), ffmpeg.deleteFile(outputPath)]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Không thể ghép cứng phụ đề.';
+      appendLog(video.id, `Lỗi ghép cứng phụ đề: ${message}`);
+      alert(`Không thể tạo video ghép cứng phụ đề. ${message}`);
+    } finally { updateVideoSubState(video.id, { isBurning: false }); }
+  };
+
   // Tải tất cả file SRT dưới dạng ZIP
   const handleDownloadAllZip = async () => {
     const completedEntries: { filename: string; content: string }[] = [];
@@ -622,6 +656,8 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
         </div>
       </div>
 
+      <div className="subtitle-workspace">
+      <aside className="subtitle-queue-panel">
       {/* 2. Thanh thao tác hàng loạt & Thêm video */}
       <div style={{
         display: 'flex',
@@ -886,7 +922,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                       <>
                         <button
                           type="button"
-                          onClick={() => setPreviewModal({ filename: video.file.name, srt: st.srtContent || '' })}
+                          onClick={() => setPreviewModal({ filename: video.file.name, videoUrl: video.url, srt: st.srtContent || '' })}
                           style={{
                             background: '#f8fafc',
                             border: '1px solid #cbd5e1',
@@ -898,7 +934,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                             cursor: 'pointer'
                           }}
                         >
-                          👁️ Xem SRT
+                          👁️ Xem video & SRT
                         </button>
                         <button
                           type="button"
@@ -915,6 +951,16 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                           }}
                         >
                           📥 Tải SRT
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleBurnSubtitles(video)}
+                          disabled={st.isBurning}
+                          style={{
+                            background: st.isBurning ? '#cbd5e1' : '#7c3aed', border: 'none', color: '#ffffff', padding: '0.35rem 0.75rem', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600, cursor: st.isBurning ? 'not-allowed' : 'pointer'
+                          }}
+                        >
+                          {st.isBurning ? 'Đang ghép…' : '🎞️ Ghép cứng phụ đề'}
                         </button>
                       </>
                     )}
@@ -1010,11 +1056,25 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                     </div>
                   </details>
                 )}
+                {st.burnedVideoUrl && (
+                  <a href={st.burnedVideoUrl} download={st.burnedVideoName || `${video.file.name}.subtitled.mp4`} style={{ display: 'inline-block', marginTop: '0.65rem', color: '#6d28d9', fontWeight: 700, fontSize: '0.82rem' }}>
+                    ✓ Tải video đã ghép cứng phụ đề
+                  </a>
+                )}
               </div>
             );
           })}
         </div>
       )}
+
+      </aside>
+      <section className="subtitle-preview-panel">
+        <span>PHỤ ĐỀ AI</span>
+        <h3>Chọn video ở danh sách bên trái</h3>
+        <p>Danh sách video nay nằm cố định bên trái như tab Encode. Sau khi tạo xong, dùng nút “Xem video & SRT” để kiểm tra đồng bộ thời gian và nút “Ghép cứng phụ đề” để xuất MP4.</p>
+        <div className="subtitle-preview-steps"><b>1. Chọn video</b><b>2. Tạo SRT</b><b>3. Xem thử / ghép cứng</b></div>
+      </section>
+      </div>
 
       {/* 4. Modal xem trước phụ đề SRT */}
       {previewModal && (
@@ -1043,7 +1103,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
               <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#1e293b', margin: 0 }}>
-                Xem trước phụ đề: {previewModal.filename}
+                Xem trước video & phụ đề: {previewModal.filename}
               </h3>
               <button
                 type="button"
@@ -1053,6 +1113,11 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                 ✕
               </button>
             </div>
+
+            <video controls src={previewModal.videoUrl} style={{ width: '100%', maxHeight: '360px', borderRadius: '10px', background: '#0f172a', marginBottom: '0.75rem' }}>
+              <track kind="subtitles" srcLang="vi" label="Phụ đề đã tạo" default src={`data:text/vtt;charset=utf-8,${encodeURIComponent(srtToVtt(previewModal.srt))}`} />
+            </video>
+            <p style={{ margin: '0 0 0.65rem', color: '#64748b', fontSize: '0.78rem' }}>Bấm CC trong trình phát nếu phụ đề chưa tự hiện.</p>
 
             <textarea
               readOnly
