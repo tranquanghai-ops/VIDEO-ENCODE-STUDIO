@@ -3,7 +3,7 @@ import type { FFmpeg as FFmpegType } from "@ffmpeg/ffmpeg";
 import { HeaderGeminiStatus } from "./components/HeaderGeminiStatus";
 import { GeminiKeyModal } from "./components/GeminiKeyModal";
 import { BatchSubtitleStudio } from "./components/BatchSubtitleStudio";
-import { getStoredApiKey, clearStoredApiKey, type GeminiKeyProfile } from "./services/geminiSubtitle";
+import { getStoredApiKey, type GeminiKeyProfile } from "./services/geminiSubtitle";
 import { AUTO_MODEL_ID } from "./services/modelRegistry";
 
 type Status = "ready" | "queued" | "encoding" | "done" | "error" | "stopped";
@@ -320,14 +320,6 @@ export default function App() {
     } catch { /* ignore */ }
     return () => window.removeEventListener("tdtu-gemini-keyring-change", syncStoredKeyState);
   }, []);
-
-  const handleDisconnectKey = () => {
-    if (!window.confirm("Xóa toàn bộ Gemini API Key đã lưu trên trình duyệt này?")) return;
-    clearStoredApiKey();
-    setApiKey("");
-    setApiKeyName(""); setApiKeyCount(0);
-    setKeyStorageType("none");
-  };
 
   const handleConnectedKey = (profile: GeminiKeyProfile, count: number) => {
     setApiKey(profile.key); setApiKeyName(profile.name); setApiKeyCount(count); setKeyStorageType(profile.type);
@@ -865,7 +857,6 @@ export default function App() {
             selectedModel={selectedModel}
             userEmail={userEmail}
             onOpenModal={() => setShowKeyModal(true)}
-            onDisconnect={handleDisconnectKey}
           />
           <div className="privacy-pill"><span className="status-dot" /> Xử lý cục bộ</div>
         </div>

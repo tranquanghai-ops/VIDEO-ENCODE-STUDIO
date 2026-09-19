@@ -9,7 +9,6 @@ interface HeaderGeminiStatusProps {
   selectedModel: string;
   userEmail?: string;
   onOpenModal: () => void;
-  onDisconnect: () => void;
 }
 
 export const HeaderGeminiStatus: React.FC<HeaderGeminiStatusProps> = ({
@@ -19,8 +18,7 @@ export const HeaderGeminiStatus: React.FC<HeaderGeminiStatusProps> = ({
   keyCount,
   selectedModel,
   userEmail,
-  onOpenModal,
-  onDisconnect
+  onOpenModal
 }) => {
   const modelInfo = getModelInfo(selectedModel);
   const modelLabel = selectedModel === 'auto' ? 'Tự động' : modelInfo?.displayName || selectedModel;
@@ -92,24 +90,6 @@ export const HeaderGeminiStatus: React.FC<HeaderGeminiStatusProps> = ({
             }}
           >
             Quản lý keys
-          </button>
-          <button
-            type="button"
-            onClick={onDisconnect}
-            title="Xóa toàn bộ Gemini API Key đã lưu"
-            style={{
-              background: 'rgba(239, 68, 68, 0.2)',
-              border: 'none',
-              color: '#fca5a5',
-              padding: '0.25rem 0.6rem',
-              borderRadius: '6px',
-              fontSize: '0.75rem',
-              fontWeight: 600,
-              cursor: 'pointer',
-              transition: 'background 0.15s'
-            }}
-          >
-            Xóa tất cả
           </button>
         </div>
       ) : (

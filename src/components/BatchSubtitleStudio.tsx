@@ -74,6 +74,7 @@ export interface VideoSubtitleState {
   burnedVideoUrl?: string;
   burnedVideoName?: string;
   isBurning?: boolean;
+  burnProgress?: number;
 }
 
 const formatTime = (seconds: number) => {
@@ -112,6 +113,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
   const abortControllerRef = useRef<AbortController | null>(null);
   const stopRequestedRef = useRef(false);
   const activeVideoIdRef = useRef<string | null>(null);
+  const burningVideoIdRef = useRef<string | null>(null);
   const [isDragging, setIsDragging] = useState<boolean>(false);
 
   // Synchronize subtitle states whenever videos list changes
@@ -405,25 +407,43 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
     const subtitleName = `subtitle-${video.id}.srt`;
     const outputName = `${video.file.name.replace(/\.[^/.]+$/, '')}.subtitled.mp4`;
     const outputPath = `subtitle-output-${video.id}.mp4`;
-    updateVideoSubState(video.id, { isBurning: true });
+    burningVideoIdRef.current = video.id;
+    updateVideoSubState(video.id, { isBurning: true, burnProgress: 0 });
     appendLog(video.id, 'Đang ghép cứng phụ đề vào video MP4.');
     try {
       const ffmpeg = await ffmpegLoader();
+      const onProgress = ({ progress }: { progress: number }) => {
+        updateVideoSubState(video.id, { burnProgress: Math.max(1, Math.min(99, Math.round(progress * 100))) });
+      };
+      ffmpeg.on('progress', onProgress);
       await ffmpeg.writeFile(inputName, new Uint8Array(await video.file.arrayBuffer()));
       await ffmpeg.writeFile(subtitleName, new TextEncoder().encode(state.srtContent));
       await ffmpeg.exec(['-i', inputName, '-vf', `subtitles=${subtitleName}`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-c:a', 'aac', '-movflags', '+faststart', outputPath]);
+      ffmpeg.off('progress', onProgress);
       const output = await ffmpeg.readFile(outputPath);
       const blob = new Blob([new Uint8Array(Array.from(output as Uint8Array))], { type: 'video/mp4' });
       const previous = subStates[video.id]?.burnedVideoUrl;
       if (previous) URL.revokeObjectURL(previous);
-      updateVideoSubState(video.id, { burnedVideoUrl: URL.createObjectURL(blob), burnedVideoName: outputName });
+      updateVideoSubState(video.id, { burnedVideoUrl: URL.createObjectURL(blob), burnedVideoName: outputName, burnProgress: 100 });
       appendLog(video.id, 'Đã tạo video MP4 ghép cứng phụ đề.');
       await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(subtitleName), ffmpeg.deleteFile(outputPath)]);
     } catch (error) {
+      if (burningVideoIdRef.current !== video.id) {
+        appendLog(video.id, 'Đã dừng ghép cứng phụ đề.');
+        return;
+      }
       const message = error instanceof Error ? error.message : 'Không thể ghép cứng phụ đề.';
       appendLog(video.id, `Lỗi ghép cứng phụ đề: ${message}`);
       alert(`Không thể tạo video ghép cứng phụ đề. ${message}`);
-    } finally { updateVideoSubState(video.id, { isBurning: false }); }
+    } finally { if (burningVideoIdRef.current === video.id) burningVideoIdRef.current = null; updateVideoSubState(video.id, { isBurning: false }); }
+  };
+
+  const handleStopBurning = (video: VideoItem) => {
+    if (burningVideoIdRef.current !== video.id) return;
+    appendLog(video.id, 'Đã yêu cầu dừng quá trình ghép cứng phụ đề.');
+    onEmergencyStopEngine();
+    burningVideoIdRef.current = null;
+    updateVideoSubState(video.id, { isBurning: false, burnProgress: 0 });
   };
 
   // Tải tất cả file SRT dưới dạng ZIP
@@ -962,6 +982,15 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                         >
                           {st.isBurning ? 'Đang ghép…' : '🎞️ Ghép cứng phụ đề'}
                         </button>
+                        {st.isBurning && (
+                          <button
+                            type="button"
+                            onClick={() => handleStopBurning(video)}
+                            style={{ background: '#b91c1c', border: 'none', color: '#ffffff', padding: '0.35rem 0.75rem', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 700, cursor: 'pointer' }}
+                          >
+                            ■ Dừng ghép
+                          </button>
+                        )}
                       </>
                     )}
 
@@ -1006,14 +1035,18 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                 </div>
 
                 {/* Thanh tiến trình riêng từng video */}
-                {isWorking && (
+                {(isWorking || st.isBurning) && (
                   <div style={{ marginTop: '0.65rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.3rem', color: '#475569', fontSize: '0.75rem', fontWeight: 600 }}>
+                      <span>{st.isBurning ? 'Đang ghép cứng phụ đề vào video…' : st.statusText}</span>
+                      <span>{st.isBurning ? `${st.burnProgress || 0}%` : `${st.progressPercent}%`}</span>
+                    </div>
                     <div style={{ width: '100%', height: '6px', background: '#e2e8f0', borderRadius: '999px', overflow: 'hidden' }}>
                       <div
                         style={{
-                          width: `${st.progressPercent}%`,
+                          width: `${st.isBurning ? st.burnProgress || 0 : st.progressPercent}%`,
                           height: '100%',
-                          background: '#0284c7',
+                          background: st.isBurning ? '#7c3aed' : '#0284c7',
                           transition: 'width 0.3s ease'
                         }}
                       />
