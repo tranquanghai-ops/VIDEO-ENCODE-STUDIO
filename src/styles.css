@@ -16,6 +16,7 @@ button { color:inherit; }
 .eyebrow { display:block; margin-bottom:7px; color:#7a8791; font-size:9px; font-weight:800; letter-spacing:.16em; }
 .panel-heading h2,.editor-title h2 { margin:0; max-width:700px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:20px; letter-spacing:-.03em; }
 .text-button,.remove-button { border:0; background:transparent; color:var(--blue); font-size:12px; font-weight:800; cursor:pointer; }.remove-button { color:#b44242; }
+.video-title-actions { display:flex; align-items:center; gap:12px; flex-shrink:0; }.video-title-actions button { border:0; background:transparent; color:var(--blue); font-size:12px; font-weight:800; cursor:pointer; }.video-title-actions .remove-button { color:#b44242; }.video-title-actions button:disabled { opacity:.45; cursor:not-allowed; }
 .queue-actions { display:flex; align-items:center; gap:8px; }.queue-actions .delete-all { color:#b44242; font-size:9px; }
 .dropzone { width:100%; min-height:270px; margin-top:22px; border:1.5px dashed #b8c5cb; border-radius:18px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:9px; color:var(--muted); background:#fff; cursor:pointer; transition:.2s; }
 .dropzone:hover,.dropzone.is-dragging { border-color:var(--blue); background:#f5f9ff; transform:translateY(-2px); }.dropzone strong { color:var(--ink); font-size:14px; }.dropzone span { font-size:12px; }.dropzone small { margin-top:8px; color:#9aa5ad; font-size:10px; }

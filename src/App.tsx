@@ -107,6 +107,18 @@ const defaults: Settings = {
 const APP_VERSION = "1.7.0";
 const accepted = ".mp4,.mov,.avi,.wmv,.webm,.mkv,.m4v,.mpeg,.mpg";
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+const normalizeMobileFileName = (file: File, index: number) => {
+  const name = (file.name || '').trim();
+  const mimeExtension: Record<string, string> = { 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm', 'video/x-matroska': 'mkv', 'video/x-msvideo': 'avi' };
+  const extension = name.match(/\.([a-z0-9]{2,5})$/i)?.[1] || mimeExtension[file.type] || 'mp4';
+  const stem = name.replace(/\.[^/.]+$/, '');
+  // Một số phiên bản Chrome trên Android trả về content URI/ID số thay cho tên gốc.
+  // Đặt tên ổn định để tên trong hàng đợi và tên file xuất ra không còn là dãy số.
+  if (!stem || /^\d{6,}$/.test(stem) || /^content[-_]?\d+$/i.test(stem)) {
+    return `video-${new Date(file.lastModified || Date.now()).toISOString().slice(0, 10)}-${index + 1}.${extension}`;
+  }
+  return name;
+};
 const makeSegment = (start: number, end: number): TrimSegment => ({ id: makeId(), start, end, enabled: true });
 const roundTime = (value: number) => Math.round(value * 10) / 10;
 const timeParts = (value: number) => {
@@ -426,7 +438,9 @@ export default function App() {
   const addFiles = async (files: FileList | File[]) => {
     const list = Array.from(files).filter((file) => /video|mp4|quicktime|avi|matroska|webm|wmv|mpeg/i.test(`${file.type} ${file.name}`));
     if (!list.length) { setNotice("Không tìm thấy tệp video phù hợp."); return; }
-    const prepared = await Promise.all(list.map(async (file): Promise<VideoItem> => {
+    const prepared = await Promise.all(list.map(async (sourceFile, index): Promise<VideoItem> => {
+      const normalizedName = normalizeMobileFileName(sourceFile, index);
+      const file = normalizedName === sourceFile.name ? sourceFile : new File([sourceFile], normalizedName, { type: sourceFile.type, lastModified: sourceFile.lastModified });
       const meta = await readBrowserMetadata(file);
       const firstSegment = makeSegment(0, meta.duration || 0);
       return { id: makeId(), file, ...meta, checked: true, analysisStatus: "pending", thumbnails: [], status: "ready", progress: 0, settings: { ...templateSettingsRef.current }, trimEnabled: false, cutOnly: false, segments: [firstSegment], activeSegmentId: firstSegment.id };
@@ -554,6 +568,19 @@ export default function App() {
       if (target) { URL.revokeObjectURL(target.url); if (target.outputUrl) URL.revokeObjectURL(target.outputUrl); target.segmentOutputs?.forEach((output) => URL.revokeObjectURL(output.url)); target.thumbnails.forEach((thumb) => thumb.url.startsWith("blob:") && URL.revokeObjectURL(thumb.url)); }
       const next = items.filter((item) => item.id !== id); if (selectedId === id) setSelectedId(next[0]?.id ?? null); return next;
     });
+  };
+
+  const renameVideo = (id: string) => {
+    const item = videos.find((video) => video.id === id);
+    if (!item || item.status === 'encoding') return;
+    const extension = item.file.name.match(/\.[^/.]+$/)?.[0] || '.mp4';
+    const currentBase = item.file.name.slice(0, -extension.length);
+    const requested = window.prompt('Đặt tên video (không cần phần mở rộng):', currentBase)?.trim();
+    if (!requested) return;
+    const safeBase = requested.replace(/[\\/:*?"<>|]/g, '-').replace(/\.(mp4|mov|avi|wmv|webm|mkv|m4v|mpeg|mpg)$/i, '').trim();
+    if (!safeBase) return;
+    const file = new File([item.file], `${safeBase}${extension}`, { type: item.file.type, lastModified: item.file.lastModified });
+    setVideos((items) => items.map((video) => video.id === id ? { ...video, file } : video));
   };
 
   const buildArgs = (item: VideoItem, segment: TrimSegment, inputName: string, outputName: string) => {
@@ -904,7 +931,7 @@ export default function App() {
             </aside>
 
             <section className="editor-panel">{!selected ? <div className="empty-editor"><span>▶</span><h2>Chưa có video</h2><p>Thêm một hoặc nhiều video để bắt đầu chuyển đổi.</p></div> : <>
-              <div className="editor-title"><div><span className="eyebrow">THIẾT LẬP VIDEO</span><h2>{selected.file.name}</h2></div><button className="remove-button" onClick={() => removeVideo(selected.id)}>Xóa</button></div>
+              <div className="editor-title"><div><span className="eyebrow">THIẾT LẬP VIDEO</span><h2>{selected.file.name}</h2></div><div className="video-title-actions"><button type="button" onClick={() => renameVideo(selected.id)} disabled={selected.status === 'encoding'}>Đổi tên</button><button className="remove-button" onClick={() => removeVideo(selected.id)}>Xóa</button></div></div>
               <div className={`preview-grid ${selected.outputUrl ? "has-output" : ""}`}>
                 <article className="video-preview-card"><div className="preview-card-head"><div><span>VIDEO GỐC</span><strong>{selected.width || "?"} × {selected.height || "?"}</strong></div><button onClick={() => void fullscreen(`source-${selected.id}`)}>⛶ Toàn màn hình</button></div><video id={`source-${selected.id}`} src={selected.url} controls preload="metadata" /></article>
                 {selected.outputUrl ? <article className="video-preview-card output"><div className="preview-card-head"><div><span>{selected.cutOnly ? "SAU CẮT" : "SAU MÃ HÓA"}</span><strong>{selected.cutOnly ? `${selected.sourceInfo?.format || selected.file.name.split(".").pop()?.toUpperCase()} · ${selected.sourceInfo?.videoCodec?.toUpperCase() || "Giữ nguyên codec"}` : `${selected.settings.format.toUpperCase()} · ${selected.settings.videoCodec === "libx264" ? "H.264" : selected.settings.videoCodec === "libvpx-vp9" ? "VP9" : "MPEG-4"}`}</strong></div><button onClick={() => void fullscreen(`output-${selected.id}`)}>⛶ Toàn màn hình</button></div><video id={`output-${selected.id}`} src={selected.outputUrl} controls preload="metadata" /></article> : <article className="output-placeholder"><span>→</span><strong>{selected.cutOnly ? "Xem trước sau cắt" : "Xem trước sau mã hóa"}</strong><small>{selected.cutOnly ? "Video sau khi cắt sẽ xuất hiện tại đây và giữ nguyên codec gốc." : "Video kết quả sẽ xuất hiện tại đây để so sánh chất lượng."}</small></article>}
@@ -954,6 +981,7 @@ export default function App() {
           videos={videos}
           onAddFiles={addFiles}
           onRemoveVideo={removeVideo}
+          onRenameVideo={renameVideo}
           ffmpegLoader={loadEngine}
           apiKey={apiKey}
           isConnected={Boolean(apiKey)}

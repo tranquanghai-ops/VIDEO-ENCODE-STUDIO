@@ -35,6 +35,7 @@ interface BatchSubtitleStudioProps {
   videos: VideoItem[];
   onAddFiles: (files: FileList | File[]) => Promise<void>;
   onRemoveVideo: (id: string) => void;
+  onRenameVideo: (id: string) => void;
   ffmpegLoader: () => Promise<FFmpegType>;
   apiKey: string;
   isConnected: boolean;
@@ -90,6 +91,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
   videos,
   onAddFiles,
   onRemoveVideo,
+  onRenameVideo,
   ffmpegLoader,
   apiKey,
   isConnected,
@@ -1018,6 +1020,16 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                     {isStopped && (
                       <button type="button" onClick={() => handleRetrySingle(video)} disabled={isBatchRunning} style={{ background: '#0284c7', border: 'none', color: '#ffffff', padding: '0.35rem 0.75rem', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600, cursor: isBatchRunning ? 'not-allowed' : 'pointer' }}>▶ Tiếp tục</button>
                     )}
+
+                    <button
+                      type="button"
+                      onClick={() => onRenameVideo(video.id)}
+                      disabled={isBatchRunning || st.isBurning}
+                      title="Đổi tên video và tên file xuất"
+                      style={{ background: '#edf4fd', border: 'none', color: '#1767d2', cursor: isBatchRunning || st.isBurning ? 'not-allowed' : 'pointer', fontSize: '0.78rem', fontWeight: 700, padding: '0.35rem 0.6rem', borderRadius: '6px' }}
+                    >
+                      Đổi tên
+                    </button>
 
                     <button
                       type="button"
