@@ -75,6 +75,8 @@ export function getStoredApiKeys(): GeminiKeyProfile[] {
     const type = legacySession ? 'session' : 'local';
     const migrated: GeminiKeyProfile = { id: makeKeyId(), name: 'Gemini API cũ', key: legacyKey, type, createdAt: Date.now() };
     writeProfiles([migrated], type); localStorage.setItem(STORAGE_KEY_ACTIVE_ID, migrated.id);
+    sessionStorage.removeItem(STORAGE_KEY_SESSION);
+    localStorage.removeItem(STORAGE_KEY_LOCAL);
     return [migrated];
   } catch { return []; }
 }

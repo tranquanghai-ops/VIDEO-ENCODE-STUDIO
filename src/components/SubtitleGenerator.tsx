@@ -65,7 +65,7 @@ export const SubtitleGenerator: React.FC<SubtitleGeneratorProps> = ({
   // Model & Language Configuration
   const [selectedModel, setSelectedModel] = useState<string>(AUTO_MODEL_ID);
   const [sourceLang, setSourceLang] = useState<string>('vi');
-  const [mode, setMode] = useState<'original' | 'translate'>('original');
+  const [mode, setMode] = useState<'original' | 'translate'>('translate');
   const [targetLang, setTargetLang] = useState<string>('en');
 
   // Processing & Chunk States

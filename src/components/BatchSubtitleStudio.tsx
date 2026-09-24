@@ -102,7 +102,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
 }) => {
   // Batch settings
   const [sourceLang, setSourceLang] = useState<string>('auto'); // Mặc định AUTO DETECT
-  const [mode, setMode] = useState<'original' | 'translate'>('original');
+  const [mode, setMode] = useState<'original' | 'translate'>('translate');
   const [targetLang, setTargetLang] = useState<string>('vi'); // Mặc định dịch sang Tiếng Việt
   const [sendParts, setSendParts] = useState<1 | 2 | 3 | 4>(1);
 
@@ -509,7 +509,6 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
 
           {/* Trạng thái kết nối nhanh */}
           <div>
-            {!isConnected && (
               <button
                 type="button"
                 onClick={onOpenKeyModal}
@@ -524,9 +523,8 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                   cursor: 'pointer'
                 }}
               >
-                🔑 Kết nối Gemini cá nhân để bắt đầu
+                🔑 {isConnected ? 'Quản lý / thêm API key' : 'Kết nối Gemini cá nhân để bắt đầu'}
               </button>
-            )}
           </div>
         </div>
 
