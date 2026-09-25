@@ -14,6 +14,8 @@ type AudioCodec = "aac" | "libmp3lame" | "libopus" | "libvorbis" | "none";
 type AudioChannels = "source" | "1" | "2";
 type AudioSampleRate = "source" | "32000" | "44100" | "48000";
 type H264Level = "auto" | "2.1" | "2.2" | "3.0" | "3.1" | "4.0" | "4.1";
+type H264Profile = "auto" | "baseline" | "main" | "high";
+type FrameRate = "source" | "25" | "30";
 
 type TrimSegment = {
   id: string;
@@ -35,6 +37,8 @@ type Settings = {
   videoCodec: VideoCodec;
   videoBitrate: string;
   h264Level: H264Level;
+  h264Profile: H264Profile;
+  frameRate: FrameRate;
   audioCodec: AudioCodec;
   audioBitrate: string;
   audioChannels: AudioChannels;
@@ -99,17 +103,17 @@ type VideoItem = {
 };
 
 const defaults: Settings = {
-  format: "mp4", videoCodec: "libx264", videoBitrate: "auto", h264Level: "auto", audioCodec: "aac", audioBitrate: "128k",
+  format: "mp4", videoCodec: "libx264", videoBitrate: "auto", h264Level: "auto", h264Profile: "auto", frameRate: "source", audioCodec: "aac", audioBitrate: "128k",
   audioChannels: "source", audioSampleRate: "source",
   resolution: "source", customWidth: 1920, customHeight: 1080, aspect: "source",
 };
 
 const APP_VERSION = "1.7.0";
-const accepted = ".mp4,.mov,.avi,.wmv,.webm,.mkv,.m4v,.mpeg,.mpg";
+const accepted = ".mp4,.mov,.avi,.wmv,.webm,.mkv,.m4v,.mpeg,.mpg,.ts,.mts,.m2ts";
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 const normalizeMobileFileName = (file: File, index: number) => {
   const name = (file.name || '').trim();
-  const mimeExtension: Record<string, string> = { 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm', 'video/x-matroska': 'mkv', 'video/x-msvideo': 'avi' };
+  const mimeExtension: Record<string, string> = { 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm', 'video/x-matroska': 'mkv', 'video/x-msvideo': 'avi', 'video/mp2t': 'ts' };
   const extension = name.match(/\.([a-z0-9]{2,5})$/i)?.[1] || mimeExtension[file.type] || 'mp4';
   const stem = name.replace(/\.[^/.]+$/, '');
   // Một số phiên bản Chrome trên Android trả về content URI/ID số thay cho tên gốc.
@@ -220,6 +224,15 @@ function makeEncodeError(error: unknown, logs: string[], item: VideoItem): Encod
       title: "Thiết lập kích thước không hợp lệ",
       message: "Kích thước, tỉ lệ hoặc codec đã chọn không thể kết hợp với nhau.",
       suggestions: ["Dùng chiều rộng và chiều cao là số chẵn.", "Chọn Giữ nguyên hoặc thử 640 × 360."],
+      technical,
+    };
+  }
+  if (/\.(?:ts|mts|m2ts)$/i.test(item.file.name) || /mpegts/i.test(item.sourceInfo?.format || "")) {
+    return {
+      code: "TS_CONVERSION_FAILED",
+      title: "Không chuyển đổi được tệp MPEG-TS",
+      message: "Bộ mã hóa chưa xử lý được luồng MPEG-TS này với thiết lập hiện tại.",
+      suggestions: ["Bấm Áp dụng thiết lập tương thích rồi mã hóa lại.", "Không bật Chỉ cắt nếu cần đổi codec cho thiết bị cũ.", "Nếu tệp dài làm trình duyệt thiếu bộ nhớ, hãy cắt thành các đoạn ngắn hơn."],
       technical,
     };
   }
@@ -436,7 +449,7 @@ export default function App() {
   };
 
   const addFiles = async (files: FileList | File[]) => {
-    const list = Array.from(files).filter((file) => /video|mp4|quicktime|avi|matroska|webm|wmv|mpeg/i.test(`${file.type} ${file.name}`));
+    const list = Array.from(files).filter((file) => /video|mp4|quicktime|avi|matroska|webm|wmv|mpeg|\.(?:ts|mts|m2ts)$/i.test(`${file.type} ${file.name}`));
     if (!list.length) { setNotice("Không tìm thấy tệp video phù hợp."); return; }
     const prepared = await Promise.all(list.map(async (sourceFile, index): Promise<VideoItem> => {
       const normalizedName = normalizeMobileFileName(sourceFile, index);
@@ -569,6 +582,16 @@ export default function App() {
       const next = items.filter((item) => item.id !== id); if (selectedId === id) setSelectedId(next[0]?.id ?? null); return next;
     });
   };
+  const useLegacyDevicePreset = () => {
+    if (!selected || selected.status === "encoding") return;
+    updateSettings({
+      format: "mp4", videoCodec: "libx264", h264Profile: "baseline", h264Level: "3.0",
+      videoBitrate: "1M", frameRate: "25", resolution: "custom", customWidth: 640, customHeight: 360,
+      aspect: "source", audioCodec: "aac", audioBitrate: "96k", audioChannels: "2", audioSampleRate: "44100",
+    });
+    setVideos((items) => items.map((item) => item.id === selected.id ? { ...item, cutOnly: false } : item));
+    setNotice("Đã chọn MP4 H.264 Baseline 640×360, 25 fps và AAC cho thiết bị cũ. Bấm Mã hóa video này để xuất tệp mới.");
+  };
 
   const renameVideo = (id: string) => {
     const item = videos.find((video) => video.id === id);
@@ -577,7 +600,7 @@ export default function App() {
     const currentBase = item.file.name.slice(0, -extension.length);
     const requested = window.prompt('Đặt tên video (không cần phần mở rộng):', currentBase)?.trim();
     if (!requested) return;
-    const safeBase = requested.replace(/[\\/:*?"<>|]/g, '-').replace(/\.(mp4|mov|avi|wmv|webm|mkv|m4v|mpeg|mpg)$/i, '').trim();
+    const safeBase = requested.replace(/[\\/:*?"<>|]/g, '-').replace(/\.(mp4|mov|avi|wmv|webm|mkv|m4v|mpeg|mpg|ts|mts|m2ts)$/i, '').trim();
     if (!safeBase) return;
     const file = new File([item.file], `${safeBase}${extension}`, { type: item.file.type, lastModified: item.file.lastModified });
     setVideos((items) => items.map((video) => video.id === id ? { ...video, file } : video));
@@ -585,6 +608,8 @@ export default function App() {
 
   const buildArgs = (item: VideoItem, segment: TrimSegment, inputName: string, outputName: string) => {
     const s = item.settings, args: string[] = [];
+    const transportStream = /\.(?:ts|mts|m2ts)$/i.test(item.file.name) || /mpegts/i.test(item.sourceInfo?.format || "");
+    if (transportStream) args.push("-fflags", "+genpts");
     if (segment.start > 0) args.push("-ss", String(segment.start)); args.push("-i", inputName);
     if (segment.end > segment.start && segment.end < item.duration - 0.05) args.push("-t", String(segment.end - segment.start));
     if (item.cutOnly) {
@@ -593,17 +618,19 @@ export default function App() {
       args.push("-y", outputName);
       return args;
     }
-    args.push("-c:v", s.videoCodec);
+    args.push("-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-c:v", s.videoCodec);
     if (s.videoCodec === "libx264") {
       args.push("-preset", "veryfast", "-crf", s.videoBitrate === "auto" ? "23" : "21", "-pix_fmt", "yuv420p");
+      if (s.h264Profile !== "auto") args.push("-profile:v", s.h264Profile);
       if (s.h264Level !== "auto") {
-        if (s.h264Level === "2.1" || s.h264Level === "2.2") args.push("-profile:v", "main");
+        if (s.h264Profile === "auto" && (s.h264Level === "2.1" || s.h264Level === "2.2")) args.push("-profile:v", "main");
         args.push("-level:v", s.h264Level);
       }
     }
     if (s.videoCodec === "libvpx-vp9") args.push("-crf", s.videoBitrate === "auto" ? "32" : "28", "-b:v", s.videoBitrate === "auto" ? "0" : s.videoBitrate);
     if (s.videoCodec === "mpeg4") args.push("-q:v", "4");
     if (s.videoBitrate !== "auto" && s.videoCodec !== "libvpx-vp9") args.push("-b:v", s.videoBitrate);
+    if (s.frameRate !== "source") args.push("-r", s.frameRate);
     const filters: string[] = [];
     if (s.aspect !== "source") { const ratio = s.aspect.replace(":", "/"); filters.push(`crop='min(iw,ih*${ratio})':'min(ih,iw/(${ratio}))'`); }
     const heights: Record<string, number> = { "2160": 2160, "1080": 1080, "720": 720, "480": 480 }, height = heights[s.resolution];
@@ -617,6 +644,7 @@ export default function App() {
       if (s.audioChannels !== "source") args.push("-ac", s.audioChannels);
       if (s.audioSampleRate !== "source") args.push("-ar", s.audioSampleRate);
     }
+    if (transportStream) args.push("-avoid_negative_ts", "make_zero");
     if (s.format === "mp4" || s.format === "mov") args.push("-movflags", "+faststart"); args.push("-y", outputName); return args;
   };
 
@@ -716,6 +744,8 @@ export default function App() {
       const useBrowserH264 = !item.cutOnly && (sourceCodec === "av1" || sourceCodec === "h264" || sourceCodec.startsWith("avc"))
         && item.settings.format === "mp4"
         && item.settings.videoCodec === "libx264"
+        && item.settings.h264Profile === "auto"
+        && item.settings.frameRate === "source"
         && (item.settings.h264Level === "auto" || item.settings.h264Level === "3.1");
       const encodedSegments: Array<{ segment: TrimSegment; bytes: Uint8Array; fileName: string }> = [];
 
@@ -941,6 +971,14 @@ export default function App() {
 
               <section className="filmstrip-section"><div className="section-title"><div><span className="eyebrow">THUMBNAIL THEO THỜI GIAN</span><h3>10 đoạn đại diện của video</h3></div><small>Nhấn vào ảnh để xem đúng thời điểm</small></div><div className="filmstrip">{selected.thumbnails.length ? selected.thumbnails.map((thumb, index) => <button key={`${thumb.time}-${index}`} onClick={() => jumpToThumbnail(selected, thumb)}><img src={thumb.url} alt={`Đoạn ${index + 1}`} /><span>{formatTime(thumb.time)}</span></button>) : Array.from({ length: 10 }, (_, index) => <i key={index} className="thumb-skeleton" />)}</div></section>
 
+              <section className="compatibility-panel">
+                <div><strong>Xuất video cho thiết bị cũ</strong><small>{/\.(?:ts|mts|m2ts)$/i.test(selected.file.name) ? 'Tệp MPEG-TS cần được mã hóa lại để đổi codec và độ tương thích.' : 'Dùng MP4 với H.264 Baseline và AAC nếu thiết bị không phát được video hiện tại.'}</small></div>
+                <button type="button" onClick={useLegacyDevicePreset} disabled={selected.status === "encoding"}>Áp dụng thiết lập tương thích</button>
+                {!selected.cutOnly && selected.settings.videoCodec === "libx264" && <div className="compatibility-options">
+                  <label>H.264 Profile<select value={selected.settings.h264Profile} onChange={(event) => updateSettings({ h264Profile: event.target.value as H264Profile })}><option value="auto">Tự động</option><option value="baseline">Baseline — thiết bị cũ</option><option value="main">Main</option><option value="high">High</option></select></label>
+                  <label>Tốc độ khung hình<select value={selected.settings.frameRate} onChange={(event) => updateSettings({ frameRate: event.target.value as FrameRate })}><option value="source">Giữ nguyên</option><option value="25">25 fps</option><option value="30">30 fps</option></select></label>
+                </div>}
+              </section>
               <div className="settings-grid">
                 {selected.trimEnabled && selected.cutOnly ? <section className="encode-settings-locked"><span>🔒</span><div><strong>Thiết lập mã hóa đã khóa</strong><small>Chế độ “Chỉ cắt” giữ nguyên định dạng, video codec, audio codec, bitrate và kích thước của file gốc.</small></div></section> : <>
                 <fieldset><legend>Hình ảnh</legend><label>Định dạng<select value={selected.settings.format} onChange={(e) => updateSettings({ format: e.target.value as Format })}><option value="mp4">MP4</option><option value="mov">MOV</option><option value="webm">WebM</option><option value="mkv">MKV</option></select></label><label>Video codec<select value={selected.settings.videoCodec} onChange={(e) => updateSettings({ videoCodec: e.target.value as VideoCodec })}><option value="libx264">H.264 — tương thích cao</option><option value="libvpx-vp9">VP9 — dung lượng nhỏ</option><option value="mpeg4">MPEG-4</option></select></label><label>H.264 Level<select disabled={selected.settings.videoCodec !== "libx264"} value={selected.settings.h264Level} onChange={(e) => updateSettings({ h264Level: e.target.value as H264Level })}><option value="auto">Tự động</option><option value="2.1">Level 2.1</option><option value="2.2">Level 2.2 — đầu xe đời cũ</option><option value="3.0">Level 3.0</option><option value="3.1">Level 3.1</option><option value="4.0">Level 4.0</option><option value="4.1">Level 4.1</option></select></label><label>Video bitrate<select value={selected.settings.videoBitrate} onChange={(e) => updateSettings({ videoBitrate: e.target.value })}><option value="auto">Tự động (khuyên dùng)</option><option value="100k">100 kbps — cực nhỏ</option><option value="150k">150 kbps</option><option value="200k">200 kbps</option><option value="250k">250 kbps</option><option value="300k">300 kbps — rất nhỏ</option><option value="500k">500 kbps</option><option value="800k">800 kbps — phù hợp 360p/480p</option><option value="1M">1 Mbps</option><option value="1500k">1,5 Mbps</option><option value="2M">2 Mbps</option><option value="5M">5 Mbps</option><option value="10M">10 Mbps</option><option value="20M">20 Mbps</option></select></label><small className="setting-hint">AV1 thường cần bitrate thấp hơn H.264 để đạt chất lượng tương đương.</small></fieldset>

@@ -754,7 +754,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
             ref={fileInputRef}
             type="file"
             multiple
-            accept="video/*,.mp4,.mov,.avi,.wmv,.webm,.mkv"
+            accept="video/*,.mp4,.mov,.avi,.wmv,.webm,.mkv,.ts,.mts,.m2ts"
             style={{ display: 'none' }}
             onChange={(e) => {
               if (e.target.files) void onAddFiles(e.target.files);
