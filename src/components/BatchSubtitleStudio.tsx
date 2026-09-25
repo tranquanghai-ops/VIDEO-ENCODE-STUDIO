@@ -108,6 +108,8 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
 
   // Per-video subtitle states mapped by video.id
   const [subStates, setSubStates] = useState<Record<string, VideoSubtitleState>>({});
+  const subStatesRef = useRef(subStates);
+  subStatesRef.current = subStates;
   const [isBatchRunning, setIsBatchRunning] = useState<boolean>(false);
   const [previewModal, setPreviewModal] = useState<{ filename: string; videoUrl: string; srt: string } | null>(null);
 
@@ -166,6 +168,13 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
     }
   };
 
+  const waitBeforeRequest = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+    if (signal.aborted) { reject(new DOMException('Đã dừng theo yêu cầu.', 'AbortError')); return; }
+    const timer = window.setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+    const onAbort = () => { window.clearTimeout(timer); reject(new DOMException('Đã dừng theo yêu cầu.', 'AbortError')); };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
   const toggleCheck = (id: string) => {
     setSubStates((prev) => ({
       ...prev,
@@ -188,7 +197,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
 
   // Helper xử lý 1 video
   const processSingleVideo = async (video: VideoItem, signal: AbortSignal, isResume: boolean = false) => {
-    const currentState = subStates[video.id];
+    const currentState = subStatesRef.current[video.id];
     let chunks: ExtractedChunk[] = currentState?.cachedChunks || [];
     activeVideoIdRef.current = video.id;
     if (!isResume) updateVideoSubState(video.id, { logs: [] });
@@ -197,7 +206,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
     try {
       ensureNotStopped(signal);
       // 1. Trích xuất âm thanh và phân đoạn nếu chưa có chunks
-      if (!isResume || chunks.length === 0) {
+      if (chunks.length === 0) {
         updateVideoSubState(video.id, {
           status: 'extracting',
           statusText: 'Đang trích xuất audio (FFmpeg WASM)...',
@@ -238,7 +247,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
       });
 
       const totalChunks = chunks.length;
-      const results: ChunkProcessResult[] = isResume && currentState?.chunkResults ? [...currentState.chunkResults] : [];
+      const results: ChunkProcessResult[] = chunks.length && currentState?.chunkResults ? [...currentState.chunkResults] : [];
 
       const srcLangObj = LANGUAGES.find((l) => l.code === sourceLang);
       const tgtLangObj = LANGUAGES.find((l) => l.code === targetLang);
@@ -261,25 +270,41 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
           progressPercent: 30 + Math.round(((i + 1) / totalChunks) * 65)
         });
 
-        const res = await processAudioChunk(
-          chunk,
-          {
-            sourceLang,
-            sourceLangName: srcLangObj?.name || 'Tự động nhận diện',
-            mode,
-            targetLang,
-            targetLangName: tgtLangObj?.name || 'Tiếng Việt',
-            modelId: selectedModel,
-            apiKey
-          },
-          apiKey,
-          (noticeMsg) => {
-            updateVideoSubState(video.id, { statusText: noticeMsg });
-            appendLog(video.id, noticeMsg);
-          },
-          signal
-        );
+        if (i > 0 || isResume) {
+          appendLog(video.id, 'Chờ 2 giây để tránh gửi dồn lên API.');
+          await waitBeforeRequest(2000, signal);
+        }
+        let res: ChunkProcessResult | undefined;
+        for (let retry = 0; retry < 2; retry++) {
+          ensureNotStopped(signal);
+          if (retry > 0) {
+            const waitMs = retry * 5000;
+            appendLog(video.id, `Chỉ thử lại đoạn ${chunkIndex}/${totalChunks} sau ${waitMs / 1000} giây.`);
+            await waitBeforeRequest(waitMs, signal);
+          }
+          res = await processAudioChunk(
+            chunk,
+            {
+              sourceLang,
+              sourceLangName: srcLangObj?.name || 'Tự động nhận diện',
+              mode,
+              targetLang,
+              targetLangName: tgtLangObj?.name || 'Tiếng Việt',
+              modelId: selectedModel,
+              apiKey
+            },
+            apiKey,
+            (noticeMsg) => {
+              updateVideoSubState(video.id, { statusText: noticeMsg });
+              appendLog(video.id, noticeMsg);
+            },
+            signal
+          );
+          if (res.status === 'success') break;
+          appendLog(video.id, `Đoạn ${chunkIndex}/${totalChunks} chưa thành công: ${res.errorMessage || 'Gemini không phản hồi'}`);
+        }
         ensureNotStopped(signal);
+        if (!res) throw new Error(`Không có kết quả cho đoạn ${chunkIndex}/${totalChunks}.`);
 
         const rIdx = results.findIndex((r) => r.chunkId === chunk.id);
         if (rIdx >= 0) results[rIdx] = res;
@@ -355,8 +380,9 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
       for (const video of checkedVideos) {
         if (controller.signal.aborted || stopRequestedRef.current) break;
         // Nếu video đã hoàn thành thì không chạy lại
-        if (subStates[video.id]?.status === 'done') continue;
-        await processSingleVideo(video, controller.signal, false);
+        const current = subStatesRef.current[video.id];
+        if (current?.status === 'done') continue;
+        await processSingleVideo(video, controller.signal, Boolean(current?.cachedChunks?.length));
       }
     } finally {
       if (abortControllerRef.current === controller) abortControllerRef.current = null;
@@ -474,7 +500,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
 
   return (
     <section style={{
-      maxWidth: '1280px',
+      width: '100%',
       margin: '0 auto',
       padding: '1.5rem',
       boxSizing: 'border-box'
@@ -1103,6 +1129,24 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                     </div>
                   </details>
                 )}
+                {!!st.chunkResults?.length && (
+                  <details className="subtitle-chat-log">
+                    <summary>Hội thoại với AI · {st.chunkResults.length} phần</summary>
+                    <div className="subtitle-chat-messages">
+                      {[...st.chunkResults].sort((a, b) => a.index - b.index).map((result) => (
+                        <div key={result.chunkId} className="subtitle-chat-turn">
+                          <div className="subtitle-chat-request">Đã gửi audio phần {result.index}/{result.total}</div>
+                          <div className={`subtitle-chat-response ${result.status === 'error' ? 'error' : ''}`}>
+                            <strong>AI {result.modelUsed ? `· ${result.modelUsed}` : ''}</strong>
+                            <p>{result.status === 'success'
+                              ? result.items.map((item) => item.text).join('\n') || 'AI không nhận ra lời thoại trong phần này.'
+                              : result.errorMessage || 'Không nhận được kết quả. Chỉ phần này sẽ được gửi lại.'}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
                 {st.burnedVideoUrl && (
                   <a href={st.burnedVideoUrl} download={st.burnedVideoName || `${video.file.name}.subtitled.mp4`} style={{ display: 'inline-block', marginTop: '0.65rem', color: '#6d28d9', fontWeight: 700, fontSize: '0.82rem' }}>
                     ✓ Tải video đã ghép cứng phụ đề
@@ -1115,12 +1159,6 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
       )}
 
       </aside>
-      <section className="subtitle-preview-panel">
-        <span>PHỤ ĐỀ AI</span>
-        <h3>Chọn video ở danh sách bên trái</h3>
-        <p>Danh sách video nay nằm cố định bên trái như tab Encode. Sau khi tạo xong, dùng nút “Xem video & SRT” để kiểm tra đồng bộ thời gian và nút “Ghép cứng phụ đề” để xuất MP4.</p>
-        <div className="subtitle-preview-steps"><b>1. Chọn video</b><b>2. Tạo SRT</b><b>3. Xem thử / ghép cứng</b></div>
-      </section>
       </div>
 
       {/* 4. Modal xem trước phụ đề SRT */}

@@ -301,16 +301,20 @@ export async function processAudioChunk(
   signal?: AbortSignal
 ): Promise<ChunkProcessResult> {
   signal?.throwIfAborted();
-  const modelChain = config.modelId === AUTO_MODEL_ID
+  const modelChain = [...new Set(config.modelId === AUTO_MODEL_ID
     ? getAutoModelFallbackChain()
-    : [config.modelId];
+    : [config.modelId, ...getAutoModelFallbackChain()])].slice(0, 3);
   const keyCandidates = getApiKeyCandidates(apiKey);
 
   let lastError = 'Không thể xử lý đoạn âm thanh này.';
   let successfulModel = '';
 
-  for (const currentModel of modelChain) {
+  for (const [modelIndex, currentModel] of modelChain.entries()) {
     signal?.throwIfAborted();
+    if (modelIndex > 0) {
+      onRetryNotice?.(`Đang chờ 3 giây rồi chuyển sang mô hình ${currentModel} cho đoạn ${chunk.index}/${chunk.total}.`);
+      await sleep(3000, signal);
+    }
     const endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/' + currentModel + ':generateContent';
 
     // Xây dựng chỉ dẫn tạo Structured JSON
@@ -365,7 +369,7 @@ export async function processAudioChunk(
     };
 
     // Retry loop với exponential backoff cho lỗi 429: 3s -> 6s -> 12s -> 24s
-    const backoffDelays = [3000, 6000, 12000, 24000];
+    const backoffDelays = [3000, 6000];
     let attempt = 0;
     let success = false;
     let rawResponseText = '';
@@ -393,6 +397,7 @@ export async function processAudioChunk(
             const nextKey = keyCandidates[keyIndex];
             if (nextKey.id !== 'current') setActiveStoredApiKey(nextKey.id);
             if (onRetryNotice) onRetryNotice(`Khóa “${keyProfile.name}” đã hết hạn mức. Đang tự chuyển sang “${nextKey.name}”…`);
+            await sleep(2000, signal);
             continue;
           } else if (attempt < backoffDelays.length) {
             const waitMs = backoffDelays[attempt];
@@ -410,12 +415,13 @@ export async function processAudioChunk(
           }
         }
 
-        if ((response.status === 400 || response.status === 401 || response.status === 403) && keyIndex < keyCandidates.length - 1) {
+        if ((response.status === 401 || response.status === 403) && keyIndex < keyCandidates.length - 1) {
           keyIndex++;
           attempt = 0;
           const nextKey = keyCandidates[keyIndex];
           if (nextKey.id !== 'current') setActiveStoredApiKey(nextKey.id);
           if (onRetryNotice) onRetryNotice(`Khóa “${keyProfile.name}” không còn hợp lệ. Đang tự chuyển sang “${nextKey.name}”…`);
+          await sleep(2000, signal);
           continue;
         }
 
