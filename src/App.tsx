@@ -227,6 +227,15 @@ function makeEncodeError(error: unknown, logs: string[], item: VideoItem): Encod
       technical,
     };
   }
+  if (/aborted\(\)/.test(joined) && /moving the moov atom|starting second pass/.test(joined)) {
+    return {
+      code: "MP4_FINALIZE_ABORTED",
+      title: "Trình duyệt dừng khi hoàn tất MP4 lớn",
+      message: "Luồng video và âm thanh đã mã hóa xong, nhưng FFmpeg WASM bị dừng khi sắp xếp lại tệp MP4 trong bộ nhớ.",
+      suggestions: ["Thử bản mới: MP4 do Mediabunny tạo sẽ được xuất trực tiếp, không chạy lại bước này.", "Nếu thiết bị vẫn không đọc được profile High, thử thiết lập tương thích với đoạn video ngắn trước."],
+      technical,
+    };
+  }
   if (/\.(?:ts|mts|m2ts)$/i.test(item.file.name) || /mpegts/i.test(item.sourceInfo?.format || "")) {
     return {
       code: "TS_CONVERSION_FAILED",
@@ -678,10 +687,10 @@ export default function App() {
       if (s.audioSampleRate !== "source") args.push("-ar", s.audioSampleRate);
     }
     if (transportStream) args.push("-avoid_negative_ts", "make_zero");
-    if (s.format === "mp4" || s.format === "mov") args.push("-movflags", "+faststart"); args.push("-y", outputName); return args;
+    if ((s.format === "mp4" || s.format === "mov") && !transportStream) args.push("-movflags", "+faststart"); args.push("-y", outputName); return args;
   };
 
-  const encodeH264WithBrowserCodecs = async (item: VideoItem, segment: TrimSegment, segmentIndex: number, segmentCount: number) => {
+  const encodeH264WithBrowserCodecs = async (item: VideoItem, segment: TrimSegment, segmentIndex: number, segmentCount: number, directOutput = false) => {
     const {
       ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, Quality,
     } = await import("mediabunny");
@@ -720,7 +729,7 @@ export default function App() {
       videoOptions.fit = "contain";
     }
 
-    const canCopySourceAac = s.audioCodec !== "none" && item.sourceInfo?.audioCodec.toLowerCase() === "aac";
+    const canCopySourceAac = !directOutput && s.audioCodec !== "none" && item.sourceInfo?.audioCodec.toLowerCase() === "aac";
     const audio = s.audioCodec === "none" ? { discard: true as const } : canCopySourceAac ? {
       codec: "aac" as const,
     } : {
@@ -768,7 +777,47 @@ export default function App() {
     const outputFormat = item.cutOnly ? ext : item.settings.format;
     const inputName = `input-${safeId}.${ext}`, outputName = `output-${safeId}.${outputFormat}`, concatListName = `concat-${safeId}.txt`;
     const temporaryFiles = new Set<string>([inputName, outputName, concatListName]);
+    const sourceCodec = item.sourceInfo?.videoCodec.toLowerCase() || "";
+    const useBrowserH264 = !item.cutOnly && (sourceCodec === "av1" || sourceCodec === "h264" || sourceCodec.startsWith("avc"))
+      && item.settings.format === "mp4"
+      && item.settings.videoCodec === "libx264"
+      && item.settings.h264Profile === "auto"
+      && item.settings.frameRate === "source"
+      && (item.settings.h264Level === "auto" || item.settings.h264Level === "3.1");
+    let browserAttempted = false;
     try {
+      // Mediabunny đã tạo MP4 có fast-start và AAC. Với một đoạn, dùng trực tiếp
+      // thay vì sao chép hàng trăm MB vào FFmpeg WASM rồi chạy faststart lần nữa.
+      if (useBrowserH264 && (item.settings.audioCodec === "aac" || item.settings.audioCodec === "none") && segments.length === 1 && mode === "combined") {
+        browserAttempted = true;
+        try {
+          const bytes = await encodeH264WithBrowserCodecs(item, segments[0], 0, 1, true);
+          if (cancelCurrentRef.current) throw new Error("Đã dừng theo yêu cầu.");
+          const blob = new Blob([bytes], { type: "video/mp4" });
+          const base = item.file.name.replace(/\.[^.]+$/, "");
+          const outputInfo: SourceInfo = {
+            format: "MP4", videoCodec: "h264", videoBitrate: parseBitrate(item.settings.videoBitrate),
+            audioCodec: item.settings.audioCodec === "none" ? "Không có âm thanh" : "aac",
+            audioBitrate: item.settings.audioCodec === "none" ? undefined : parseBitrate(item.settings.audioBitrate),
+            audioChannels: item.settings.audioChannels === "source" ? item.sourceInfo?.audioChannels : Number(item.settings.audioChannels),
+            audioSampleRate: item.settings.audioSampleRate === "source" ? item.sourceInfo?.audioSampleRate : Number(item.settings.audioSampleRate),
+          };
+          setVideos((all) => all.map((v) => v.id === item.id ? {
+            ...v, status: "done", progress: 100, outputUrl: URL.createObjectURL(blob), outputName: `${base}-encoded.mp4`,
+            outputInfo, outputDuration: segments[0].end - segments[0].start,
+            outputWidth: item.settings.resolution === "custom" ? item.settings.customWidth : item.width,
+            outputHeight: item.settings.resolution === "custom" ? item.settings.customHeight : item.height,
+            outputSize: bytes.byteLength,
+          } : v));
+          setNotice("Đã xuất MP4 trực tiếp, không xử lý lại bằng FFmpeg. Nếu thiết bị chỉ nhận H.264 Baseline, hãy dùng thiết lập tương thích.");
+          return true;
+        } catch (browserError) {
+          if (cancelCurrentRef.current) throw browserError;
+          activeMediaConversionRef.current = null;
+          logs.push(`WebCodecs fallback: ${browserError instanceof Error ? browserError.message : String(browserError)}`);
+          setNotice("Bộ mã hóa trình duyệt không hoàn tất; đang thử FFmpeg.");
+        }
+      }
       ffmpeg = await loadEngine();
       const { fetchFile } = await import("@ffmpeg/util");
       onProgress = ({ progress }) => setVideos((all) => all.map((v) => v.id === item.id ? { ...v, progress: Math.min(99, Math.max(0, Math.round((progressSegmentIndex + progress) / segments.length * 92))) } : v));
@@ -776,13 +825,6 @@ export default function App() {
       ffmpeg.on("progress", onProgress); ffmpeg.on("log", onLog);
       await ffmpeg.writeFile(inputName, await fetchFile(item.file));
 
-      const sourceCodec = item.sourceInfo?.videoCodec.toLowerCase() || "";
-      const useBrowserH264 = !item.cutOnly && (sourceCodec === "av1" || sourceCodec === "h264" || sourceCodec.startsWith("avc"))
-        && item.settings.format === "mp4"
-        && item.settings.videoCodec === "libx264"
-        && item.settings.h264Profile === "auto"
-        && item.settings.frameRate === "source"
-        && (item.settings.h264Level === "auto" || item.settings.h264Level === "3.1");
       const encodedSegments: Array<{ segment: TrimSegment; bytes: Uint8Array; fileName: string }> = [];
 
       for (let index = 0; index < segments.length; index++) {
@@ -792,7 +834,7 @@ export default function App() {
         const browserFileName = `browser-${safeId}-${index}.mp4`;
         temporaryFiles.add(segmentFileName); temporaryFiles.add(browserFileName);
         let browserBytes: Uint8Array | undefined;
-        if (useBrowserH264) {
+        if (useBrowserH264 && !browserAttempted) {
           try {
             browserBytes = await encodeH264WithBrowserCodecs(item, segment, index, segments.length);
           } catch (browserError) {
