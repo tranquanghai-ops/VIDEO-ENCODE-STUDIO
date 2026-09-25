@@ -43,6 +43,8 @@ interface BatchSubtitleStudioProps {
   onModelChange: (model: string) => void;
   onOpenKeyModal: () => void;
   onEmergencyStopEngine: () => void;
+  isEncodeBusy: boolean;
+  onBusyChange: (busy: boolean) => void;
 }
 
 const LANGUAGES = [
@@ -98,7 +100,9 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
   selectedModel,
   onModelChange,
   onOpenKeyModal,
-  onEmergencyStopEngine
+  onEmergencyStopEngine,
+  isEncodeBusy,
+  onBusyChange
 }) => {
   // Batch settings
   const [sourceLang, setSourceLang] = useState<string>('auto'); // Mặc định AUTO DETECT
@@ -111,6 +115,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
   const subStatesRef = useRef(subStates);
   subStatesRef.current = subStates;
   const [isBatchRunning, setIsBatchRunning] = useState<boolean>(false);
+  useEffect(() => { onBusyChange(isBatchRunning || Object.values(subStates).some((state) => state.isBurning)); }, [isBatchRunning, subStates, onBusyChange]);
   const [previewModal, setPreviewModal] = useState<{ filename: string; videoUrl: string; srt: string } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -359,6 +364,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
 
   // Chạy Batch toàn bộ video được chọn (Sequential - Lần lượt)
   const handleStartBatch = async () => {
+    if (isEncodeBusy || isBatchRunning) return;
     if (!isConnected || !apiKey) {
       onOpenKeyModal();
       return;
@@ -402,6 +408,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
 
   // Thử lại riêng 1 video bị lỗi
   const handleRetrySingle = async (video: VideoItem) => {
+    if (isEncodeBusy || isBatchRunning) return;
     if (!isConnected || !apiKey) {
       onOpenKeyModal();
       return;
@@ -429,6 +436,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
   };
 
   const handleBurnSubtitles = async (video: VideoItem) => {
+    if (isEncodeBusy) return;
     const state = subStates[video.id];
     if (!state?.srtContent || state.isBurning) return;
     const inputName = `subtitle-input-${video.id}.mp4`;
@@ -804,7 +812,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
           <button
             type="button"
             onClick={handleStartBatch}
-            disabled={isBatchRunning || checkedCount === 0}
+            disabled={isBatchRunning || isEncodeBusy || checkedCount === 0}
             style={{
               background: isBatchRunning || checkedCount === 0 ? '#cbd5e1' : '#10b981',
               color: '#ffffff',
@@ -1001,7 +1009,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                         <button
                           type="button"
                           onClick={() => void handleBurnSubtitles(video)}
-                          disabled={st.isBurning}
+                          disabled={st.isBurning || isEncodeBusy}
                           style={{
                             background: st.isBurning ? '#cbd5e1' : '#7c3aed', border: 'none', color: '#ffffff', padding: '0.35rem 0.75rem', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600, cursor: st.isBurning ? 'not-allowed' : 'pointer'
                           }}
@@ -1025,7 +1033,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                       <button
                         type="button"
                         onClick={() => handleRetrySingle(video)}
-                        disabled={isBatchRunning}
+                        disabled={isBatchRunning || isEncodeBusy}
                         style={{
                           background: '#f59e0b',
                           border: 'none',
@@ -1042,7 +1050,7 @@ export const BatchSubtitleStudio: React.FC<BatchSubtitleStudioProps> = ({
                     )}
 
                     {isStopped && (
-                      <button type="button" onClick={() => handleRetrySingle(video)} disabled={isBatchRunning} style={{ background: '#0284c7', border: 'none', color: '#ffffff', padding: '0.35rem 0.75rem', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600, cursor: isBatchRunning ? 'not-allowed' : 'pointer' }}>▶ Tiếp tục</button>
+                      <button type="button" onClick={() => handleRetrySingle(video)} disabled={isBatchRunning || isEncodeBusy} style={{ background: '#0284c7', border: 'none', color: '#ffffff', padding: '0.35rem 0.75rem', borderRadius: '6px', fontSize: '0.8rem', fontWeight: 600, cursor: isBatchRunning || isEncodeBusy ? 'not-allowed' : 'pointer' }}>▶ Tiếp tục</button>
                     )}
 
                     <button

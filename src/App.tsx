@@ -179,7 +179,7 @@ function makeEncodeError(error: unknown, logs: string[], item: VideoItem): Encod
   const usefulLogs = logs
     .map((line) => line.trim())
     .filter((line) => line && !/^frame=|^size=|^time=|^bitrate=|^speed=/.test(line));
-  const technical = usefulLogs.slice(-14).join("\n") || rawMessage;
+  const technical = usefulLogs.slice(-30).join("\n") || rawMessage;
   const joined = `${rawMessage}\n${technical}`.toLowerCase();
 
   if (/video av1 hiện được hỗ trợ.*mp4.*h\.264/.test(joined)) {
@@ -232,7 +232,7 @@ function makeEncodeError(error: unknown, logs: string[], item: VideoItem): Encod
       code: "TS_CONVERSION_FAILED",
       title: "Không chuyển đổi được tệp MPEG-TS",
       message: "Bộ mã hóa chưa xử lý được luồng MPEG-TS này với thiết lập hiện tại.",
-      suggestions: ["Bấm Áp dụng thiết lập tương thích rồi mã hóa lại.", "Không bật Chỉ cắt nếu cần đổi codec cho thiết bị cũ.", "Nếu tệp dài làm trình duyệt thiếu bộ nhớ, hãy cắt thành các đoạn ngắn hơn."],
+      suggestions: ["Mở Chi tiết lỗi FFmpeg trong hàng đợi và gửi nội dung để xác định nguyên nhân.", "Không bật Chỉ cắt nếu cần đổi codec cho thiết bị cũ.", "Nếu tệp dài làm trình duyệt thiếu bộ nhớ, hãy cắt thành các đoạn ngắn hơn."],
       technical,
     };
   }
@@ -356,10 +356,13 @@ export default function App() {
   const [engineReady, setEngineReady] = useState(false);
   const [engineLoading, setEngineLoading] = useState(false);
   const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [isSubtitleBusy, setIsSubtitleBusy] = useState(false);
   const [notice, setNotice] = useState("Video được xử lý cục bộ — không tải lên máy chủ.");
   const inputRef = useRef<HTMLInputElement>(null);
   const ffmpegRef = useRef<FFmpegType | null>(null);
   const enginePromiseRef = useRef<Promise<FFmpegType> | null>(null);
+  const subtitleEngineRef = useRef<FFmpegType | null>(null);
+  const subtitleEnginePromiseRef = useRef<Promise<FFmpegType> | null>(null);
   const analysisQueueRef = useRef<Promise<void>>(Promise.resolve());
   const activeIdRef = useRef<string | null>(null);
   const cancelCurrentRef = useRef(false);
@@ -371,6 +374,7 @@ export default function App() {
   const activeSegment = selected?.segments.find((segment) => segment.id === selected.activeSegmentId) || selected?.segments[0];
   const checkedCount = videos.filter((v) => v.checked).length;
   const doneCount = videos.filter((v) => v.status === "done").length;
+  const isEncoding = videos.some((v) => v.status === "encoding") || isBatchRunning;
   const failedVideos = videos.filter((v) => v.status === "error");
   const analyzingCount = videos.filter((v) => v.analysisStatus === "running" || v.analysisStatus === "pending").length;
   const totalSize = videos.reduce((sum, item) => sum + item.file.size, 0);
@@ -398,6 +402,35 @@ export default function App() {
 
   const resetEngine = () => {
     ffmpegRef.current?.terminate(); ffmpegRef.current = null; enginePromiseRef.current = null; setEngineReady(false); setEngineLoading(false);
+  };
+
+  // Phụ đề dùng worker riêng: nút dừng phụ đề không được terminate tác vụ Encode.
+  const loadSubtitleEngine = async () => {
+    if (subtitleEngineRef.current) return subtitleEngineRef.current;
+    if (subtitleEnginePromiseRef.current) return subtitleEnginePromiseRef.current;
+    subtitleEnginePromiseRef.current = (async () => {
+      const { FFmpeg } = await import("@ffmpeg/ffmpeg");
+      const ffmpeg = new FFmpeg();
+      const runtimeBase = new URL("./ffmpeg/", window.location.href).href;
+      const [part1, part2] = await Promise.all([
+        fetch(`${runtimeBase}ffmpeg-core.wasm.part1`).then((response) => response.arrayBuffer()),
+        fetch(`${runtimeBase}ffmpeg-core.wasm.part2`).then((response) => response.arrayBuffer()),
+      ]);
+      const wasmURL = URL.createObjectURL(new Blob([part1, part2], { type: "application/wasm" }));
+      try {
+        await ffmpeg.load({ coreURL: `${runtimeBase}ffmpeg-core.js`, wasmURL });
+        subtitleEngineRef.current = ffmpeg;
+        return ffmpeg;
+      } finally { URL.revokeObjectURL(wasmURL); }
+    })();
+    try { return await subtitleEnginePromiseRef.current; }
+    finally { subtitleEnginePromiseRef.current = null; }
+  };
+
+  const resetSubtitleEngine = () => {
+    subtitleEngineRef.current?.terminate();
+    subtitleEngineRef.current = null;
+    subtitleEnginePromiseRef.current = null;
   };
 
   const makeFfmpegThumbnails = async (ffmpeg: FFmpegType, inputName: string, id: string, duration: number) => {
@@ -717,6 +750,8 @@ export default function App() {
   };
 
   const encodeOne = async (item: VideoItem, mode: "combined" | "individual" = "combined") => {
+    if (isSubtitleBusy) { setNotice("Đang xử lý phụ đề. Hãy chờ hoặc dừng tác vụ đó trước khi mã hóa video."); return false; }
+    if (activeIdRef.current) return false;
     const segments = item.trimEnabled
       ? item.segments.filter((segment) => segment.enabled && segment.end - segment.start >= 0.1)
       : [{ id: `${item.id}-full`, start: 0, end: item.duration, enabled: true }];
@@ -727,6 +762,7 @@ export default function App() {
     setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "encoding", progress: 0, error: undefined, encodeError: undefined, outputUrl: undefined, outputName: undefined, segmentOutputs: undefined, outputInfo: undefined, outputDuration: undefined, outputWidth: undefined, outputHeight: undefined, outputSize: undefined } : v));
     let ffmpeg: FFmpegType | null = null; let onProgress: ((data: { progress: number }) => void) | null = null;
     let onLog: ((data: { message: string }) => void) | null = null; const logs: string[] = [];
+    let lastEncodeCommand = "";
     let progressSegmentIndex = 0;
     const safeId = item.id.replaceAll("-", ""), ext = item.file.name.split(".").pop()?.toLowerCase() || "mp4";
     const outputFormat = item.cutOnly ? ext : item.settings.format;
@@ -778,7 +814,9 @@ export default function App() {
           const exitCode = await ffmpeg.exec(["-i", browserFileName, "-c:v", "copy", ...audioArgs, "-movflags", "+faststart", "-y", segmentFileName]);
           if (exitCode !== 0) throw new Error("Không thể tạo lại âm thanh theo bitrate đã chọn.");
         } else {
-          const exitCode = await ffmpeg.exec(buildArgs(item, segment, inputName, segmentFileName));
+          const args = buildArgs(item, segment, inputName, segmentFileName);
+          lastEncodeCommand = `Lệnh FFmpeg: ${args.join(" ")}`;
+          const exitCode = await ffmpeg.exec(args);
           if (exitCode !== 0) throw new Error(`Không thể mã hóa đoạn ${index + 1}.`);
         }
         if (cancelCurrentRef.current) throw new Error("Đã dừng theo yêu cầu.");
@@ -850,7 +888,12 @@ export default function App() {
       setNotice(item.cutOnly ? (segments.length > 1 ? `Đã cắt và ghép ${segments.length} đoạn, không chuyển đổi codec.` : "Đã cắt video, không chuyển đổi codec.") : segments.length > 1 ? `Đã ghép ${segments.length} đoạn thành một video hoàn chỉnh.` : "Đã mã hóa video thành công.");
       return true;
     } catch (error) {
+      if (cancelCurrentRef.current || (error instanceof Error && /called FFmpeg\.terminate\(\)/i.test(error.message))) {
+        setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: "stopped", error: "Tiến trình FFmpeg đã bị dừng. Bấm mã hóa để thử lại.", encodeError: undefined } : v));
+        return false;
+      }
       const encodeError = makeEncodeError(error, logs, item);
+      if (lastEncodeCommand) encodeError.technical = `${lastEncodeCommand}\n${encodeError.technical || ""}`;
       setVideos((all) => all.map((v) => v.id === item.id ? { ...v, status: cancelCurrentRef.current ? "stopped" : "error", error: encodeError.message, encodeError } : v));
       return false;
     } finally {
@@ -863,6 +906,8 @@ export default function App() {
   };
 
   const encodeChecked = async () => {
+    if (isSubtitleBusy) { setNotice("Đang xử lý phụ đề. Hãy chờ hoặc dừng tác vụ đó trước khi mã hóa video."); return; }
+    if (activeIdRef.current || isBatchRunning) return;
     const queue = videos.filter((video) => video.checked && video.status !== "done"); if (!queue.length) return;
     cancelBatchRef.current = false; setIsBatchRunning(true);
     setVideos((all) => all.map((v) => v.checked && v.status !== "done" ? { ...v, status: "queued" } : v));
@@ -957,7 +1002,7 @@ export default function App() {
                 </div>)}</div>
               </>}
               {videos.length > 0 && <div className="queue-summary"><span>{formatBytes(totalSize)}</span><span>{doneCount}/{videos.length} hoàn tất</span></div>}
-              {failedVideos.length > 0 && <section className="batch-errors"><strong>⚠ {failedVideos.length} video cần kiểm tra</strong>{failedVideos.map((item) => <button key={item.id} onClick={() => setSelectedId(item.id)}><span>{item.file.name}</span><small>{item.encodeError?.title || item.error || "Mã hóa không thành công"}</small></button>)}</section>}
+              {failedVideos.length > 0 && <section className="batch-errors"><strong>⚠ {failedVideos.length} video cần kiểm tra</strong>{failedVideos.map((item) => <div className="batch-error-item" key={item.id}><button onClick={() => setSelectedId(item.id)}><span>{item.file.name}</span><small>{item.encodeError?.title || item.error || "Mã hóa không thành công"}</small></button>{item.encodeError?.technical && <details><summary>Chi tiết lỗi FFmpeg — mở để gửi cho tôi</summary><pre>{item.encodeError.technical}</pre><button type="button" onClick={() => void navigator.clipboard.writeText(`${item.file.name}\n${item.encodeError?.code}\n${item.encodeError?.technical}`)}>Sao chép lỗi</button></details>}</div>)}</section>}
             </aside>
 
             <section className="editor-panel">{!selected ? <div className="empty-editor"><span>▶</span><h2>Chưa có video</h2><p>Thêm một hoặc nhiều video để bắt đầu chuyển đổi.</p></div> : <>
@@ -1020,13 +1065,15 @@ export default function App() {
           onAddFiles={addFiles}
           onRemoveVideo={removeVideo}
           onRenameVideo={renameVideo}
-          ffmpegLoader={loadEngine}
+          ffmpegLoader={loadSubtitleEngine}
           apiKey={apiKey}
           isConnected={Boolean(apiKey)}
           selectedModel={selectedModel}
           onModelChange={setSelectedModel}
           onOpenKeyModal={() => setShowKeyModal(true)}
-          onEmergencyStopEngine={resetEngine}
+          onEmergencyStopEngine={resetSubtitleEngine}
+          isEncodeBusy={isEncoding}
+          onBusyChange={setIsSubtitleBusy}
         />
       </div>
 
